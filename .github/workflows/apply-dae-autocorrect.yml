@@ -1,0 +1,84 @@
+name: Apply dae documentation AutoCorrect fix
+
+on:
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: write
+
+concurrency:
+  group: dae-integration-autocorrect-${{ github.head_ref }}
+  cancel-in-progress: false
+
+jobs:
+  apply:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    env:
+      HEAD_BRANCH: ${{ github.head_ref }}
+      HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+      CLEAN_INTEGRATION_SHA: ce41b4ccc2e077040b9fb716a00fe529271a3c90
+    steps:
+      - name: Check out feature branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.HEAD_SHA }}
+          fetch-depth: 0
+
+      - name: Reset to the clean integration commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -B "$HEAD_BRANCH" "$HEAD_SHA"
+          git reset --hard "$CLEAN_INTEGRATION_SHA"
+          git clean -fdx
+
+      - name: Apply repository AutoCorrect rules
+        uses: huacnlee/autocorrect-action@v2
+
+      - name: Verify and squash the documentation change
+        shell: bash
+        run: |
+          set -euo pipefail
+          changed="$(git diff --name-only)"
+          if [[ "$changed" != "docs/en/configuration/dns.md" ]]; then
+            printf 'unexpected AutoCorrect changes:\n%s\n' "$changed" >&2
+            git diff -- >&2
+            exit 1
+          fi
+          git diff -- docs/en/configuration/dns.md
+          git add docs/en/configuration/dns.md
+          git commit --amend --no-edit
+
+      - name: Verify AutoCorrect is idempotent
+        uses: huacnlee/autocorrect-action@v2
+
+      - name: Verify a clean tree
+        shell: bash
+        run: git diff --exit-code
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: 16.x
+          cache: npm
+
+      - name: Install documentation dependencies
+        shell: bash
+        run: npm ci
+
+      - name: Run Markdown lint
+        shell: bash
+        run: npm run markdown-lint
+
+      - name: Publish the clean one-commit branch
+        shell: bash
+        run: |
+          set -euo pipefail
+          git push \
+            --force-with-lease="refs/heads/${HEAD_BRANCH}:${HEAD_SHA}" \
+            origin "HEAD:refs/heads/${HEAD_BRANCH}"
