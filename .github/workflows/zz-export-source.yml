@@ -4,6 +4,9 @@ on:
   push:
     branches:
       - tmp/export-ebpfinbound-source
+  pull_request:
+    branches:
+      - refactor/ebpf-inbound-generation
 
 permissions:
   contents: read
