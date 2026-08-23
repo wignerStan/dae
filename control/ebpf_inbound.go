@@ -78,7 +78,7 @@ func (r *controlPlaneEBPFInbound) OpenListeners(ctx context.Context, port uint16
 	if err := contextError(ctx); err != nil {
 		return nil, err
 	}
-	return r.plane.Listen(port)
+	return r.plane.openEBPFInboundListeners(ctx, port)
 }
 
 func (r *controlPlaneEBPFInbound) CommitListeners(ctx context.Context, listeners ebpfinbound.ListenerSet) error {
@@ -88,17 +88,96 @@ func (r *controlPlaneEBPFInbound) CommitListeners(ctx context.Context, listeners
 	if err := contextError(ctx); err != nil {
 		return err
 	}
-	listener, ok := listeners.(*Listener)
-	if !ok || listener == nil {
-		return fmt.Errorf("unsupported listener set type %T", listeners)
-	}
-	if listener.TCP4() == nil || listener.TCP6() == nil || listener.UDP() == nil {
-		return fmt.Errorf("commit inbound listeners: incomplete listener set")
+	if err := validateEBPFInboundListeners(listeners); err != nil {
+		return err
 	}
 	if err := r.plane.CommitPreparedDatapath(); err != nil {
 		return err
 	}
-	return r.plane.publishListenerSockets(listener)
+	return r.plane.publishEBPFInboundListeners(listeners)
+}
+
+type ebpfInboundSockets struct {
+	tcp4 net.Listener
+	tcp6 net.Listener
+	udp  *net.UDPConn
+}
+
+func validateEBPFInboundListeners(listeners ebpfinbound.ListenerSet) error {
+	if listeners == nil {
+		return fmt.Errorf("nil eBPF inbound listener set")
+	}
+	if listeners.TCP4() == nil {
+		return fmt.Errorf("eBPF inbound listener set is missing TCP4")
+	}
+	if listeners.TCP6() == nil {
+		return fmt.Errorf("eBPF inbound listener set is missing TCP6")
+	}
+	if listeners.UDP() == nil {
+		return fmt.Errorf("eBPF inbound listener set is missing UDP")
+	}
+	return nil
+}
+
+func prepareEBPFInboundListeners(
+	ctx context.Context,
+	runtime ebpfinbound.Runtime,
+	listeners ebpfinbound.ListenerSet,
+) (ebpfInboundSockets, error) {
+	if runtime == nil {
+		return ebpfInboundSockets{}, fmt.Errorf("nil eBPF inbound runtime")
+	}
+	if err := contextError(ctx); err != nil {
+		return ebpfInboundSockets{}, err
+	}
+	if err := validateEBPFInboundListeners(listeners); err != nil {
+		return ebpfInboundSockets{}, err
+	}
+	if err := runtime.CommitListeners(ctx, listeners); err != nil {
+		return ebpfInboundSockets{}, err
+	}
+	return ebpfInboundSockets{
+		tcp4: listeners.TCP4(),
+		tcp6: listeners.TCP6(),
+		udp:  listeners.UDP(),
+	}, nil
+}
+
+func openLegacyEBPFInboundListeners(
+	ctx context.Context,
+	runtime ebpfinbound.Runtime,
+	port uint16,
+) (*Listener, error) {
+	if runtime == nil {
+		return nil, fmt.Errorf("nil eBPF inbound runtime")
+	}
+	listeners, err := runtime.OpenListeners(ctx, port)
+	if err != nil {
+		return nil, err
+	}
+	listener, ok := listeners.(*Listener)
+	if ok && listener != nil {
+		return listener, nil
+	}
+	if listeners != nil {
+		_ = listeners.Close()
+	}
+	return nil, fmt.Errorf("legacy dae listener API cannot use listener set type %T", listeners)
+}
+
+// Listen is the compatibility API for existing dae callers. New consumers
+// should use EBPFInbound().OpenListeners so they do not depend on *Listener.
+func (c *ControlPlane) Listen(port uint16) (*Listener, error) {
+	if c == nil {
+		return nil, fmt.Errorf("nil control plane")
+	}
+	return openLegacyEBPFInboundListeners(context.Background(), c.EBPFInbound(), port)
+}
+
+// Serve is the compatibility API for existing dae callers. The serving path
+// itself consumes the policy-neutral ListenerSet contract.
+func (c *ControlPlane) Serve(readyChan chan<- bool, listener *Listener) error {
+	return c.ServeEBPFInbound(readyChan, listener)
 }
 
 func (r *controlPlaneEBPFInbound) LookupMetadata(ctx context.Context, flow ebpfinbound.Flow) (ebpfinbound.Metadata, bool, error) {

@@ -8,7 +8,10 @@ package control
 import (
 	"context"
 	"errors"
+	"net"
 	"testing"
+
+	"github.com/daeuniverse/dae/pkg/ebpfinbound"
 )
 
 func TestMetadataFromRoutingResult(t *testing.T) {
@@ -53,5 +56,140 @@ func TestContextError(t *testing.T) {
 	cancel()
 	if err := contextError(ctx); !errors.Is(err, context.Canceled) {
 		t.Fatalf("contextError(cancelled) = %v, want %v", err, context.Canceled)
+	}
+}
+
+type testNetListener struct{}
+
+func (testNetListener) Accept() (net.Conn, error) { return nil, net.ErrClosed }
+func (testNetListener) Close() error              { return nil }
+func (testNetListener) Addr() net.Addr            { return &net.TCPAddr{} }
+
+type testEBPFInboundListenerSet struct {
+	tcp4       net.Listener
+	tcp6       net.Listener
+	udp        *net.UDPConn
+	port       uint16
+	closeCalls int
+}
+
+func (l *testEBPFInboundListenerSet) TCP4() net.Listener { return l.tcp4 }
+func (l *testEBPFInboundListenerSet) TCP6() net.Listener { return l.tcp6 }
+func (l *testEBPFInboundListenerSet) UDP() *net.UDPConn  { return l.udp }
+func (l *testEBPFInboundListenerSet) Port() uint16       { return l.port }
+func (l *testEBPFInboundListenerSet) Close() error {
+	l.closeCalls++
+	return nil
+}
+
+type testEBPFInboundRuntime struct {
+	listeners   ebpfinbound.ListenerSet
+	openPort    uint16
+	openCalls   int
+	commitCalls int
+	committed   ebpfinbound.ListenerSet
+	commitErr   error
+}
+
+func (r *testEBPFInboundRuntime) OpenListeners(_ context.Context, port uint16) (ebpfinbound.ListenerSet, error) {
+	r.openCalls++
+	r.openPort = port
+	return r.listeners, nil
+}
+
+func (r *testEBPFInboundRuntime) CommitListeners(_ context.Context, listeners ebpfinbound.ListenerSet) error {
+	r.commitCalls++
+	r.committed = listeners
+	return r.commitErr
+}
+
+func (*testEBPFInboundRuntime) LookupMetadata(context.Context, ebpfinbound.Flow) (ebpfinbound.Metadata, bool, error) {
+	return ebpfinbound.Metadata{}, false, nil
+}
+
+func (*testEBPFInboundRuntime) OutputMark() uint32 { return 0 }
+func (*testEBPFInboundRuntime) Close() error       { return nil }
+
+func newTestEBPFInboundListenerSet() *testEBPFInboundListenerSet {
+	return &testEBPFInboundListenerSet{
+		tcp4: testNetListener{},
+		tcp6: testNetListener{},
+		udp:  &net.UDPConn{},
+		port: 12345,
+	}
+}
+
+func TestPrepareEBPFInboundListenersUsesRuntime(t *testing.T) {
+	listeners := newTestEBPFInboundListenerSet()
+	runtime := &testEBPFInboundRuntime{}
+
+	sockets, err := prepareEBPFInboundListeners(context.Background(), runtime, listeners)
+	if err != nil {
+		t.Fatalf("prepareEBPFInboundListeners() error = %v", err)
+	}
+	if runtime.commitCalls != 1 || runtime.committed != listeners {
+		t.Fatalf("CommitListeners calls = %d, listener = %T", runtime.commitCalls, runtime.committed)
+	}
+	if sockets.tcp4 != listeners.tcp4 || sockets.tcp6 != listeners.tcp6 || sockets.udp != listeners.udp {
+		t.Fatal("prepared sockets do not match listener set")
+	}
+}
+
+func TestPrepareEBPFInboundListenersValidatesBeforeCommit(t *testing.T) {
+	listeners := newTestEBPFInboundListenerSet()
+	listeners.udp = nil
+	runtime := &testEBPFInboundRuntime{}
+
+	if _, err := prepareEBPFInboundListeners(context.Background(), runtime, listeners); err == nil {
+		t.Fatal("prepareEBPFInboundListeners() error = nil, want missing UDP error")
+	}
+	if runtime.commitCalls != 0 {
+		t.Fatalf("CommitListeners calls = %d, want 0", runtime.commitCalls)
+	}
+}
+
+func TestPrepareEBPFInboundListenersHonorsContext(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	runtime := &testEBPFInboundRuntime{}
+
+	if _, err := prepareEBPFInboundListeners(ctx, runtime, newTestEBPFInboundListenerSet()); !errors.Is(err, context.Canceled) {
+		t.Fatalf("prepareEBPFInboundListeners() error = %v, want %v", err, context.Canceled)
+	}
+	if runtime.commitCalls != 0 {
+		t.Fatalf("CommitListeners calls = %d, want 0", runtime.commitCalls)
+	}
+}
+
+func TestOpenLegacyEBPFInboundListenersUsesRuntime(t *testing.T) {
+	listener := &Listener{
+		tcp4Listener: testNetListener{},
+		tcp6Listener: testNetListener{},
+		packetConn:   &net.UDPConn{},
+		port:         23456,
+	}
+	runtime := &testEBPFInboundRuntime{listeners: listener}
+
+	got, err := openLegacyEBPFInboundListeners(context.Background(), runtime, listener.port)
+	if err != nil {
+		t.Fatalf("openLegacyEBPFInboundListeners() error = %v", err)
+	}
+	if got != listener {
+		t.Fatal("openLegacyEBPFInboundListeners() returned a different listener")
+	}
+	if runtime.openCalls != 1 || runtime.openPort != listener.port {
+		t.Fatalf("OpenListeners calls = %d, port = %d", runtime.openCalls, runtime.openPort)
+	}
+}
+
+func TestOpenLegacyEBPFInboundListenersClosesForeignSet(t *testing.T) {
+	listeners := newTestEBPFInboundListenerSet()
+	runtime := &testEBPFInboundRuntime{listeners: listeners}
+
+	if _, err := openLegacyEBPFInboundListeners(context.Background(), runtime, listeners.port); err == nil {
+		t.Fatal("openLegacyEBPFInboundListeners() error = nil, want type error")
+	}
+	if listeners.closeCalls != 1 {
+		t.Fatalf("Close calls = %d, want 1", listeners.closeCalls)
 	}
 }

@@ -38,6 +38,7 @@ import (
 	"github.com/daeuniverse/dae/component/routing"
 	"github.com/daeuniverse/dae/config"
 	internal "github.com/daeuniverse/dae/pkg/ebpf_internal"
+	"github.com/daeuniverse/dae/pkg/ebpfinbound"
 	"github.com/daeuniverse/outbound/netproxy"
 	"github.com/daeuniverse/outbound/pool"
 	"github.com/daeuniverse/outbound/protocol/direct"
@@ -1321,9 +1322,12 @@ func (c *ControlPlane) closePublishedListenerFiles() error {
 	return stderrors.Join(errs...)
 }
 
-func (c *ControlPlane) publishListenerSockets(listener *Listener) error {
-	if c == nil || c.core == nil || listener == nil {
-		return fmt.Errorf("publishListenerSockets: nil control plane or listener")
+func (c *ControlPlane) publishEBPFInboundListeners(listeners ebpfinbound.ListenerSet) error {
+	if c == nil || c.core == nil {
+		return fmt.Errorf("publish eBPF inbound listeners: nil control plane")
+	}
+	if err := validateEBPFInboundListeners(listeners); err != nil {
+		return err
 	}
 
 	var (
@@ -1338,52 +1342,54 @@ func (c *ControlPlane) publishListenerSockets(listener *Listener) error {
 		}
 	}
 
-	if listener.tcp4Listener != nil {
-		tcp4File, e := dupTCPListenerFile(listener.tcp4Listener)
-		if e != nil {
-			return fmt.Errorf("failed to retrieve copy of the underlying TCP IPv4 listener file")
-		}
-		newFiles = append(newFiles, tcp4File)
-		if err = c.core.bpf.Load().ListenSocketMap.Update(consts.ZeroKey, uint64(tcp4File.Fd()), ebpf.UpdateAny); err != nil {
-			closeNewFiles()
-			return err
-		}
+	tcp4File, e := dupTCPListenerFile(listeners.TCP4())
+	if e != nil {
+		return fmt.Errorf("failed to retrieve copy of the underlying TCP IPv4 listener file")
 	}
-	if listener.tcp6Listener != nil {
-		tcp6File, e := dupTCPListenerFile(listener.tcp6Listener)
-		if e != nil {
-			closeNewFiles()
-			return fmt.Errorf("failed to retrieve copy of the underlying TCP IPv6 listener file")
-		}
-		newFiles = append(newFiles, tcp6File)
-		if err = c.core.bpf.Load().ListenSocketMap.Update(consts.TwoKey, uint64(tcp6File.Fd()), ebpf.UpdateAny); err != nil {
-			closeNewFiles()
-			return err
-		}
+	newFiles = append(newFiles, tcp4File)
+	if err = c.core.bpf.Load().ListenSocketMap.Update(consts.ZeroKey, uint64(tcp4File.Fd()), ebpf.UpdateAny); err != nil {
+		closeNewFiles()
+		return err
 	}
-	if listener.packetConn != nil {
-		udpFile, e := dupUDPPacketConnFile(listener.packetConn)
-		if e != nil {
-			closeNewFiles()
-			return fmt.Errorf("failed to retrieve copy of the underlying UDP connection file")
-		}
-		newFiles = append(newFiles, udpFile)
-		if err = c.core.bpf.Load().ListenSocketMap.Update(consts.OneKey, uint64(udpFile.Fd()), ebpf.UpdateAny); err != nil {
-			closeNewFiles()
-			return err
-		}
+
+	tcp6File, e := dupTCPListenerFile(listeners.TCP6())
+	if e != nil {
+		closeNewFiles()
+		return fmt.Errorf("failed to retrieve copy of the underlying TCP IPv6 listener file")
+	}
+	newFiles = append(newFiles, tcp6File)
+	if err = c.core.bpf.Load().ListenSocketMap.Update(consts.TwoKey, uint64(tcp6File.Fd()), ebpf.UpdateAny); err != nil {
+		closeNewFiles()
+		return err
+	}
+
+	udpFile, e := dupUDPPacketConnFile(listeners.UDP())
+	if e != nil {
+		closeNewFiles()
+		return fmt.Errorf("failed to retrieve copy of the underlying UDP connection file")
+	}
+	newFiles = append(newFiles, udpFile)
+	if err = c.core.bpf.Load().ListenSocketMap.Update(consts.OneKey, uint64(udpFile.Fd()), ebpf.UpdateAny); err != nil {
+		closeNewFiles()
+		return err
 	}
 
 	c.listenerPublishMu.Lock()
 	oldFiles := c.listenerFiles
 	c.listenerFiles = newFiles
 	c.listenerPublishMu.Unlock()
+
 	for _, f := range oldFiles {
 		if f != nil {
 			_ = f.Close()
 		}
 	}
 	return nil
+}
+
+// publishListenerSockets keeps the existing concrete listener API stable.
+func (c *ControlPlane) publishListenerSockets(listener *Listener) error {
+	return c.publishEBPFInboundListeners(listener)
 }
 
 func (c *ControlPlane) PublishListenerSockets(listener *Listener) error {
@@ -2973,7 +2979,10 @@ func shouldSkipDNSFastPathForLocalListenerTraffic(listenAddr string, src, dst ne
 	return false
 }
 
-func (c *ControlPlane) Serve(readyChan chan<- bool, listener *Listener) (err error) {
+// ServeEBPFInbound runs dae's existing policy engine on a policy-neutral
+// transparent listener set. Listener staging and publication are delegated to
+// EBPFInbound(), so the serving code no longer owns concrete datapath sockets.
+func (c *ControlPlane) ServeEBPFInbound(readyChan chan<- bool, listeners ebpfinbound.ListenerSet) (err error) {
 	sentReady := false
 	defer func() {
 		if !sentReady {
@@ -2983,13 +2992,11 @@ func (c *ControlPlane) Serve(readyChan chan<- bool, listener *Listener) (err err
 			}
 		}
 	}()
-	udpConn := listener.packetConn.(*net.UDPConn)
-	if err := c.CommitPreparedDatapath(); err != nil {
+	sockets, err := prepareEBPFInboundListeners(c.ctx, c.EBPFInbound(), listeners)
+	if err != nil {
 		return err
 	}
-	if err := c.publishListenerSockets(listener); err != nil {
-		return err
-	}
+	udpConn := sockets.udp
 	if err := c.activatePreparedRuntime(); err != nil {
 		return err
 	}
@@ -3034,8 +3041,8 @@ func (c *ControlPlane) Serve(readyChan chan<- bool, listener *Listener) (err err
 			}(lconn, drainRelease)
 		}
 	}
-	go serveTCP(listener.tcp4Listener)
-	go serveTCP(listener.tcp6Listener)
+	go serveTCP(sockets.tcp4)
+	go serveTCP(sockets.tcp6)
 	go func() {
 		processPacket := func(pktBuf pool.PB, src netip.AddrPort, oob []byte) {
 			pktDst := RetrieveOriginalDest(oob)
@@ -3338,8 +3345,16 @@ func (c *ControlPlane) Serve(readyChan chan<- bool, listener *Listener) (err err
 	return nil
 }
 
-// Listen opens the ingress listeners without starting the serving loops.
-func (c *ControlPlane) Listen(port uint16) (listener *Listener, err error) {
+// openEBPFInboundListeners is the current concrete listener implementation
+// behind the policy-neutral runtime boundary.
+func (c *ControlPlane) openEBPFInboundListeners(ctx context.Context, port uint16) (listener *Listener, err error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
 	// Listen.
 	tcpListenConfig := net.ListenConfig{
 		Control: func(network, address string, c syscall.RawConn) error {
@@ -3352,21 +3367,21 @@ func (c *ControlPlane) Listen(port uint16) (listener *Listener, err error) {
 		},
 	}
 	tcp4ListenAddr := net.JoinHostPort(c.listenIp, strconv.Itoa(int(port)))
-	tcp4Listener, err := tcpListenConfig.Listen(context.Background(), "tcp4", tcp4ListenAddr)
+	tcp4Listener, err := tcpListenConfig.Listen(ctx, "tcp4", tcp4ListenAddr)
 	if err != nil {
 		return nil, fmt.Errorf("listenTCP4: %w", err)
 	}
-	tcp6Listener, err := tcpListenConfig.Listen(context.Background(), "tcp6", net.JoinHostPort("::", strconv.Itoa(int(port))))
+	tcp6Listener, err := tcpListenConfig.Listen(ctx, "tcp6", net.JoinHostPort("::", strconv.Itoa(int(port))))
 	if err != nil {
 		_ = tcp4Listener.Close()
 		return nil, fmt.Errorf("listenTCP6: %w", err)
 	}
-	packetConn, err := udpListenConfig.ListenPacket(context.Background(), "udp6", udpDualStackListenAddr(port))
+	packetConn, err := udpListenConfig.ListenPacket(ctx, "udp6", udpDualStackListenAddr(port))
 	if err != nil {
 		if c.log != nil {
 			c.log.WithError(err).Warn("Failed to open dual-stack UDP listener; fallback to IPv4-only UDP listener")
 		}
-		packetConn, err = tcpListenConfig.ListenPacket(context.Background(), "udp", tcp4ListenAddr)
+		packetConn, err = tcpListenConfig.ListenPacket(ctx, "udp", tcp4ListenAddr)
 		if err != nil {
 			_ = tcp4Listener.Close()
 			_ = tcp6Listener.Close()
