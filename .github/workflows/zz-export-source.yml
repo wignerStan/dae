@@ -1,0 +1,30 @@
+name: Export exact dae source
+
+on:
+  push:
+    branches:
+      - tmp/export-ebpfinbound-source
+
+permissions:
+  contents: read
+
+jobs:
+  export:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          submodules: recursive
+      - name: Archive source
+        shell: bash
+        run: |
+          set -euo pipefail
+          git rev-parse HEAD > SOURCE_COMMIT
+          tar --exclude=.git --exclude=dae-source.tar.gz -czf dae-source.tar.gz .
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dae-source
+          path: dae-source.tar.gz
+          if-no-files-found: error
+          retention-days: 1
