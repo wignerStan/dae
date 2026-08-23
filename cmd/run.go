@@ -39,6 +39,7 @@ import (
 	"github.com/daeuniverse/dae/config"
 	"github.com/daeuniverse/dae/control"
 	"github.com/daeuniverse/dae/pkg/config_parser"
+	"github.com/daeuniverse/dae/pkg/ebpfinbound"
 	"github.com/daeuniverse/dae/pkg/logger"
 	"github.com/mohae/deepcopy"
 	"github.com/okzk/sdnotify"
@@ -87,9 +88,9 @@ type signalShutdownNetns interface {
 }
 
 type signalShutdownStagedHandoff struct {
-	oldListener     signalShutdownListener
+	oldGeneration   signalShutdownListener
 	oldControlPlane signalShutdownControlPlane
-	newListener     signalShutdownListener
+	newGeneration   signalShutdownListener
 	newControlPlane signalShutdownControlPlane
 }
 
@@ -130,10 +131,10 @@ type stagedReloadHandoff struct {
 	oldControlPlane  *control.ControlPlane
 	oldCancel        context.CancelFunc
 	oldConf          *config.Config
-	oldListener      *control.Listener
+	oldGeneration    ebpfinbound.Generation
 	newControlPlane  *control.ControlPlane
 	newCancel        context.CancelFunc
-	newListener      *control.Listener
+	newGeneration    ebpfinbound.Generation
 	abortConnections bool
 	hasOverlap       bool
 }
@@ -340,7 +341,7 @@ func (r *Runner) Run() (err error) {
 	}
 
 	// Serve tproxy TCP/UDP server util signals.
-	var listener *control.Listener
+	var listener ebpfinbound.Generation
 	sigs := make(chan os.Signal, 1)
 	// Keep internal wake-ups separate so queued OS signals cannot mask reload handoff notifications.
 	runStateChanges := make(chan struct{}, 1)
@@ -366,11 +367,11 @@ func (r *Runner) Run() (err error) {
 			}
 		}()
 		if runErr := control.GetDaeNetns().WithRequired("listen and serve in dae netns", func() error {
-			if listener, err = c.Listen(conf.Global.TproxyPort); err != nil {
+			if listener, err = c.EBPFInbound().OpenGeneration(context.Background(), conf.Global.TproxyPort); err != nil {
 				log.Errorln("Listen:", err)
 				return err
 			}
-			if err = c.Serve(readyChan, listener); err != nil {
+			if err = c.ServeEBPFInbound(readyChan, listener); err != nil {
 				log.Errorln("Serve:", err)
 			}
 			return err
@@ -464,7 +465,7 @@ func (r *Runner) Run() (err error) {
 				dnsCache = c.CloneDnsCache()
 			}
 			rollbackDNSCache := dnsCache
-			var stagedListener *control.Listener
+			var stagedGeneration ebpfinbound.Generation
 
 			if stagedHotHandoff {
 				log.Warnln("[Reload] Prepare staged same-port handoff")
@@ -483,7 +484,8 @@ func (r *Runner) Run() (err error) {
 					continue
 				}
 
-				stagedListener, listenErr := listener.Clone()
+				var listenErr error
+				stagedGeneration, listenErr = c.EBPFInbound().CloneGeneration(ctx, listener)
 				if listenErr != nil {
 					reloadErr := fmt.Errorf("clone listener: %w", listenErr)
 					reloadManager.setReloadError(reloadErr)
@@ -502,22 +504,22 @@ func (r *Runner) Run() (err error) {
 				oldC := c
 				oldCancel := currCancel
 				oldConf := conf
-				oldListener := listener
+				oldGeneration := listener
 
 				hasOverlap := newC.InheritDialerHealthFrom(oldC)
 				configureTransparentHugePages(log, newConf.Global.DisableTHP)
 				c = newC
 				currCancel = cancel
 				conf = newConf
-				listener = stagedListener
+				listener = stagedGeneration
 				reloadManager.setPendingStagedHandoff(&stagedReloadHandoff{
 					oldControlPlane:  oldC,
 					oldCancel:        oldCancel,
 					oldConf:          oldConf,
-					oldListener:      oldListener,
+					oldGeneration:    oldGeneration,
 					newControlPlane:  newC,
 					newCancel:        cancel,
-					newListener:      stagedListener,
+					newGeneration:    stagedGeneration,
 					abortConnections: abortConnections,
 					hasOverlap:       hasOverlap,
 				}, reloadStartedAt, reloadStartedAtMono)
@@ -571,8 +573,8 @@ func (r *Runner) Run() (err error) {
 				log.Warnln("[Reload] Prepared new control plane")
 			}
 
-			if stagedListener == nil {
-				stagedListener, err = newC.Listen(newConf.Global.TproxyPort)
+			if stagedGeneration == nil {
+				stagedGeneration, err = newC.EBPFInbound().OpenGeneration(ctx, newConf.Global.TproxyPort)
 				if err != nil {
 					reloadErr := fmt.Errorf("prepare new listener: %w", err)
 					reloadManager.setReloadError(reloadErr)
@@ -606,9 +608,9 @@ func (r *Runner) Run() (err error) {
 				}
 			}
 
-			var oldListener *control.Listener
+			var oldGeneration ebpfinbound.Generation
 			if listener != nil {
-				oldListener = listener
+				oldGeneration = listener
 			}
 
 			// Prepare new context.
@@ -621,16 +623,16 @@ func (r *Runner) Run() (err error) {
 			c = newC
 			currCancel = newCancel
 			conf = newConf
-			listener = stagedListener
+			listener = stagedGeneration
 			if stagedHotHandoff {
 				reloadManager.setPendingStagedHandoff(&stagedReloadHandoff{
 					oldControlPlane:  oldC,
 					oldCancel:        oldCancel,
 					oldConf:          oldConf,
-					oldListener:      oldListener,
+					oldGeneration:    oldGeneration,
 					newControlPlane:  newC,
 					newCancel:        newCancel,
-					newListener:      stagedListener,
+					newGeneration:    stagedGeneration,
 					abortConnections: abortConnections,
 					hasOverlap:       hasOverlap,
 				}, reloadStartedAt, reloadStartedAtMono)
@@ -643,8 +645,8 @@ func (r *Runner) Run() (err error) {
 
 			// Ready to close.
 			if oldC != nil && reloadManager.currentPendingStagedHandoff() == nil {
-				if oldListener != nil {
-					if err := oldListener.Close(); err != nil {
+				if oldGeneration != nil {
+					if err := oldGeneration.Close(); err != nil {
 						log.WithError(err).Warnln("[Reload] Failed to close previous listener generation")
 					}
 				}
@@ -698,11 +700,11 @@ loop:
 							}
 						}()
 						if runErr := control.GetDaeNetns().WithRequired("listen and serve in dae netns", func() error {
-							if listener, err = c.Listen(conf.Global.TproxyPort); err != nil {
+							if listener, err = c.EBPFInbound().OpenGeneration(context.Background(), conf.Global.TproxyPort); err != nil {
 								log.Errorln("Listen:", err)
 								return err
 							}
-							if err = c.Serve(readyChan, listener); err != nil {
+							if err = c.ServeEBPFInbound(readyChan, listener); err != nil {
 								log.Errorln("Serve:", err)
 							}
 							return err
@@ -753,7 +755,7 @@ loop:
 						default:
 						}
 					}()
-					if err := c.Serve(readyChan, listener); err != nil {
+					if err := c.ServeEBPFInbound(readyChan, listener); err != nil {
 						log.Errorln("ListenAndServe:", err)
 					}
 					notifyRunStateChange(runStateChanges)
@@ -775,7 +777,7 @@ loop:
 					log.WithError(reloadErr).Errorln("[Reload] Reload serve failed before becoming ready")
 					if handoff := reloadManager.currentPendingStagedHandoff(); handoff != nil {
 						rollbackStagedReloadHandoff(log, handoff)
-						if republishErr := handoff.oldControlPlane.PublishListenerSockets(handoff.oldListener); republishErr != nil {
+						if republishErr := handoff.oldControlPlane.EBPFInbound().CommitGeneration(context.Background(), handoff.oldGeneration); republishErr != nil {
 							log.WithError(republishErr).Errorln("[Reload] Failed to republish previous listeners after staged handoff failure")
 						}
 						if rebuildErr := handoff.oldControlPlane.RebuildReloadDatapath(); rebuildErr != nil {
@@ -784,7 +786,7 @@ loop:
 						c = handoff.oldControlPlane
 						currCancel = handoff.oldCancel
 						conf = handoff.oldConf
-						listener = handoff.oldListener
+						listener = handoff.oldGeneration
 						if restartErr := c.RestartDNSListener(); restartErr != nil {
 							log.WithError(restartErr).Warnln("[Reload] Failed to restart previous DNS listener after staged handoff rollback")
 						}
@@ -796,7 +798,7 @@ loop:
 				}
 				dnsHandoffActive := reloadManager.pendingDNSHandoffActive(c)
 				if handoff := reloadManager.currentPendingStagedHandoff(); handoff != nil {
-					oldListener := handoff.oldListener
+					oldGeneration := handoff.oldGeneration
 					oldC := handoff.oldControlPlane
 					oldCancel := handoff.oldCancel
 					abortConnections := handoff.abortConnections
@@ -808,8 +810,8 @@ loop:
 					}
 					reloadManager.clearPendingStagedHandoff()
 
-					if oldListener != nil {
-						if err := oldListener.Close(); err != nil {
+					if oldGeneration != nil {
+						if err := oldGeneration.Close(); err != nil {
 							log.WithError(err).Warnln("[Reload] Failed to close previous listener generation")
 						}
 					}
@@ -943,8 +945,8 @@ func rollbackStagedReloadHandoff(log *logrus.Logger, handoff *stagedReloadHandof
 		return
 	}
 
-	if handoff.newListener != nil {
-		if err := handoff.newListener.Close(); err != nil && log != nil {
+	if handoff.newGeneration != nil {
+		if err := handoff.newGeneration.Close(); err != nil && log != nil {
 			log.WithError(err).Warnln("[Reload] Failed to close prepared listener during rollback")
 		}
 	}
@@ -1051,11 +1053,11 @@ func shutdownAfterSignalWithHandoff(
 
 	closeListener(listener)
 	if handoff != nil {
-		if handoff.oldListener != nil && handoff.oldListener != listener {
-			closeListener(handoff.oldListener)
+		if handoff.oldGeneration != nil && handoff.oldGeneration != listener {
+			closeListener(handoff.oldGeneration)
 		}
-		if handoff.newListener != nil && handoff.newListener != listener && handoff.newListener != handoff.oldListener {
-			closeListener(handoff.newListener)
+		if handoff.newGeneration != nil && handoff.newGeneration != listener && handoff.newGeneration != handoff.oldGeneration {
+			closeListener(handoff.newGeneration)
 		}
 	}
 

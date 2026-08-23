@@ -74,24 +74,32 @@ type ListenerSet interface {
 	Port() uint16
 }
 
+// Generation is one staged set of transparent listeners. A generation is
+// opaque to policy consumers: only its sockets and close operation are
+// exposed. Cloning, validation, and publication remain runtime operations.
+type Generation interface {
+	ListenerSet
+}
+
 // Runtime is the stable userspace-facing boundary of the eBPF inbound.
 //
-// OpenListeners stages transparent sockets without starting traffic handlers.
-// CommitListeners publishes those sockets to the kernel and commits only the
-// staged capture datapath state. It must not start a policy engine, DNS server,
-// sniffer, or outbound runtime. The caller may then serve TCP and UDP using its
-// own implementation.
+// OpenGeneration stages transparent sockets without publishing them to the
+// kernel. CloneGeneration duplicates a staged or active generation for a
+// same-port handoff. CommitGeneration atomically publishes the generation
+// and commits only staged capture-datapath state. None of these operations
+// may start a policy engine, DNS server, sniffer, or outbound runtime.
 //
 // LookupMetadata returns found=false when the tuple is no longer available.
 // Consumers should treat that as missing optional metadata, not as a policy
 // decision.
 type Runtime interface {
-	OpenListeners(ctx context.Context, port uint16) (ListenerSet, error)
-	CommitListeners(ctx context.Context, listeners ListenerSet) error
+	OpenGeneration(ctx context.Context, port uint16) (Generation, error)
+	CloneGeneration(ctx context.Context, generation Generation) (Generation, error)
+	CommitGeneration(ctx context.Context, generation Generation) error
 	LookupMetadata(ctx context.Context, flow Flow) (metadata Metadata, found bool, err error)
 	OutputMark() uint32
 
-	// Close releases the datapath runtime. ListenerSet values remain owned by
+	// Close releases the datapath runtime. Generation values remain owned by
 	// the caller and must be closed separately.
 	Close() error
 }

@@ -19,8 +19,8 @@ import (
 )
 
 var (
-	_ ebpfinbound.Runtime     = (*controlPlaneEBPFInbound)(nil)
-	_ ebpfinbound.ListenerSet = (*Listener)(nil)
+	_ ebpfinbound.Runtime    = (*controlPlaneEBPFInbound)(nil)
+	_ ebpfinbound.Generation = (*Listener)(nil)
 )
 
 // controlPlaneEBPFInbound is a compatibility adapter over dae's existing
@@ -71,30 +71,44 @@ func (c *ControlPlane) EBPFInbound() ebpfinbound.Runtime {
 	return &controlPlaneEBPFInbound{plane: c}
 }
 
-func (r *controlPlaneEBPFInbound) OpenListeners(ctx context.Context, port uint16) (ebpfinbound.ListenerSet, error) {
+func (r *controlPlaneEBPFInbound) OpenGeneration(ctx context.Context, port uint16) (ebpfinbound.Generation, error) {
 	if r == nil || r.plane == nil {
 		return nil, fmt.Errorf("nil control plane")
 	}
 	if err := contextError(ctx); err != nil {
 		return nil, err
 	}
-	return r.plane.openEBPFInboundListeners(ctx, port)
+	return r.plane.openEBPFInboundGeneration(ctx, port)
 }
 
-func (r *controlPlaneEBPFInbound) CommitListeners(ctx context.Context, listeners ebpfinbound.ListenerSet) error {
+func (r *controlPlaneEBPFInbound) CloneGeneration(ctx context.Context, generation ebpfinbound.Generation) (ebpfinbound.Generation, error) {
+	if r == nil || r.plane == nil {
+		return nil, fmt.Errorf("nil control plane")
+	}
+	if err := contextError(ctx); err != nil {
+		return nil, err
+	}
+	listener, ok := generation.(*Listener)
+	if !ok || listener == nil {
+		return nil, fmt.Errorf("generation is not owned by dae runtime: %T", generation)
+	}
+	return listener.Clone()
+}
+
+func (r *controlPlaneEBPFInbound) CommitGeneration(ctx context.Context, generation ebpfinbound.Generation) error {
 	if r == nil || r.plane == nil {
 		return fmt.Errorf("nil control plane")
 	}
 	if err := contextError(ctx); err != nil {
 		return err
 	}
-	if err := validateEBPFInboundListeners(listeners); err != nil {
+	if err := validateEBPFInboundGeneration(generation); err != nil {
 		return err
 	}
 	if err := r.plane.CommitPreparedDatapath(); err != nil {
 		return err
 	}
-	return r.plane.publishEBPFInboundListeners(listeners)
+	return r.plane.publishEBPFInboundGeneration(generation)
 }
 
 type ebpfInboundSockets struct {
@@ -103,26 +117,26 @@ type ebpfInboundSockets struct {
 	udp  *net.UDPConn
 }
 
-func validateEBPFInboundListeners(listeners ebpfinbound.ListenerSet) error {
-	if listeners == nil {
-		return fmt.Errorf("nil eBPF inbound listener set")
+func validateEBPFInboundGeneration(generation ebpfinbound.Generation) error {
+	if generation == nil {
+		return fmt.Errorf("nil eBPF inbound generation")
 	}
-	if listeners.TCP4() == nil {
-		return fmt.Errorf("eBPF inbound listener set is missing TCP4")
+	if generation.TCP4() == nil {
+		return fmt.Errorf("eBPF inbound generation is missing TCP4")
 	}
-	if listeners.TCP6() == nil {
-		return fmt.Errorf("eBPF inbound listener set is missing TCP6")
+	if generation.TCP6() == nil {
+		return fmt.Errorf("eBPF inbound generation is missing TCP6")
 	}
-	if listeners.UDP() == nil {
-		return fmt.Errorf("eBPF inbound listener set is missing UDP")
+	if generation.UDP() == nil {
+		return fmt.Errorf("eBPF inbound generation is missing UDP")
 	}
 	return nil
 }
 
-func prepareEBPFInboundListeners(
+func prepareEBPFInboundGeneration(
 	ctx context.Context,
 	runtime ebpfinbound.Runtime,
-	listeners ebpfinbound.ListenerSet,
+	generation ebpfinbound.Generation,
 ) (ebpfInboundSockets, error) {
 	if runtime == nil {
 		return ebpfInboundSockets{}, fmt.Errorf("nil eBPF inbound runtime")
@@ -130,16 +144,16 @@ func prepareEBPFInboundListeners(
 	if err := contextError(ctx); err != nil {
 		return ebpfInboundSockets{}, err
 	}
-	if err := validateEBPFInboundListeners(listeners); err != nil {
+	if err := validateEBPFInboundGeneration(generation); err != nil {
 		return ebpfInboundSockets{}, err
 	}
-	if err := runtime.CommitListeners(ctx, listeners); err != nil {
+	if err := runtime.CommitGeneration(ctx, generation); err != nil {
 		return ebpfInboundSockets{}, err
 	}
 	return ebpfInboundSockets{
-		tcp4: listeners.TCP4(),
-		tcp6: listeners.TCP6(),
-		udp:  listeners.UDP(),
+		tcp4: generation.TCP4(),
+		tcp6: generation.TCP6(),
+		udp:  generation.UDP(),
 	}, nil
 }
 
@@ -151,22 +165,22 @@ func openLegacyEBPFInboundListeners(
 	if runtime == nil {
 		return nil, fmt.Errorf("nil eBPF inbound runtime")
 	}
-	listeners, err := runtime.OpenListeners(ctx, port)
+	generation, err := runtime.OpenGeneration(ctx, port)
 	if err != nil {
 		return nil, err
 	}
-	listener, ok := listeners.(*Listener)
+	listener, ok := generation.(*Listener)
 	if ok && listener != nil {
 		return listener, nil
 	}
-	if listeners != nil {
-		_ = listeners.Close()
+	if generation != nil {
+		_ = generation.Close()
 	}
-	return nil, fmt.Errorf("legacy dae listener API cannot use listener set type %T", listeners)
+	return nil, fmt.Errorf("legacy dae listener API cannot use generation type %T", generation)
 }
 
 // Listen is the compatibility API for existing dae callers. New consumers
-// should use EBPFInbound().OpenListeners so they do not depend on *Listener.
+// should use EBPFInbound().OpenGeneration so they do not depend on *Listener.
 func (c *ControlPlane) Listen(port uint16) (*Listener, error) {
 	if c == nil {
 		return nil, fmt.Errorf("nil control plane")
@@ -175,7 +189,7 @@ func (c *ControlPlane) Listen(port uint16) (*Listener, error) {
 }
 
 // Serve is the compatibility API for existing dae callers. The serving path
-// itself consumes the policy-neutral ListenerSet contract.
+// itself consumes the policy-neutral Generation contract.
 func (c *ControlPlane) Serve(readyChan chan<- bool, listener *Listener) error {
 	return c.ServeEBPFInbound(readyChan, listener)
 }

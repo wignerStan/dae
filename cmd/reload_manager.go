@@ -164,9 +164,9 @@ func (m *reloadManager) buildShutdownHandoff() *signalShutdownStagedHandoff {
 		return nil
 	}
 	return &signalShutdownStagedHandoff{
-		oldListener:     m.pendingStagedHandoff.oldListener,
+		oldGeneration:   m.pendingStagedHandoff.oldGeneration,
 		oldControlPlane: m.pendingStagedHandoff.oldControlPlane,
-		newListener:     m.pendingStagedHandoff.newListener,
+		newGeneration:   m.pendingStagedHandoff.newGeneration,
 		newControlPlane: m.pendingStagedHandoff.newControlPlane,
 	}
 }

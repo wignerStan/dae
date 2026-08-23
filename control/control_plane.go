@@ -1322,11 +1322,11 @@ func (c *ControlPlane) closePublishedListenerFiles() error {
 	return stderrors.Join(errs...)
 }
 
-func (c *ControlPlane) publishEBPFInboundListeners(listeners ebpfinbound.ListenerSet) error {
+func (c *ControlPlane) publishEBPFInboundGeneration(generation ebpfinbound.Generation) error {
 	if c == nil || c.core == nil {
-		return fmt.Errorf("publish eBPF inbound listeners: nil control plane")
+		return fmt.Errorf("publish eBPF inbound generation: nil control plane")
 	}
-	if err := validateEBPFInboundListeners(listeners); err != nil {
+	if err := validateEBPFInboundGeneration(generation); err != nil {
 		return err
 	}
 
@@ -1342,7 +1342,7 @@ func (c *ControlPlane) publishEBPFInboundListeners(listeners ebpfinbound.Listene
 		}
 	}
 
-	tcp4File, e := dupTCPListenerFile(listeners.TCP4())
+	tcp4File, e := dupTCPListenerFile(generation.TCP4())
 	if e != nil {
 		return fmt.Errorf("failed to retrieve copy of the underlying TCP IPv4 listener file")
 	}
@@ -1352,7 +1352,7 @@ func (c *ControlPlane) publishEBPFInboundListeners(listeners ebpfinbound.Listene
 		return err
 	}
 
-	tcp6File, e := dupTCPListenerFile(listeners.TCP6())
+	tcp6File, e := dupTCPListenerFile(generation.TCP6())
 	if e != nil {
 		closeNewFiles()
 		return fmt.Errorf("failed to retrieve copy of the underlying TCP IPv6 listener file")
@@ -1363,7 +1363,7 @@ func (c *ControlPlane) publishEBPFInboundListeners(listeners ebpfinbound.Listene
 		return err
 	}
 
-	udpFile, e := dupUDPPacketConnFile(listeners.UDP())
+	udpFile, e := dupUDPPacketConnFile(generation.UDP())
 	if e != nil {
 		closeNewFiles()
 		return fmt.Errorf("failed to retrieve copy of the underlying UDP connection file")
@@ -1389,7 +1389,7 @@ func (c *ControlPlane) publishEBPFInboundListeners(listeners ebpfinbound.Listene
 
 // publishListenerSockets keeps the existing concrete listener API stable.
 func (c *ControlPlane) publishListenerSockets(listener *Listener) error {
-	return c.publishEBPFInboundListeners(listener)
+	return c.publishEBPFInboundGeneration(listener)
 }
 
 func (c *ControlPlane) PublishListenerSockets(listener *Listener) error {
@@ -2982,7 +2982,7 @@ func shouldSkipDNSFastPathForLocalListenerTraffic(listenAddr string, src, dst ne
 // ServeEBPFInbound runs dae's existing policy engine on a policy-neutral
 // transparent listener set. Listener staging and publication are delegated to
 // EBPFInbound(), so the serving code no longer owns concrete datapath sockets.
-func (c *ControlPlane) ServeEBPFInbound(readyChan chan<- bool, listeners ebpfinbound.ListenerSet) (err error) {
+func (c *ControlPlane) ServeEBPFInbound(readyChan chan<- bool, generation ebpfinbound.Generation) (err error) {
 	sentReady := false
 	defer func() {
 		if !sentReady {
@@ -2992,7 +2992,7 @@ func (c *ControlPlane) ServeEBPFInbound(readyChan chan<- bool, listeners ebpfinb
 			}
 		}
 	}()
-	sockets, err := prepareEBPFInboundListeners(c.ctx, c.EBPFInbound(), listeners)
+	sockets, err := prepareEBPFInboundGeneration(c.ctx, c.EBPFInbound(), generation)
 	if err != nil {
 		return err
 	}
@@ -3347,7 +3347,7 @@ func (c *ControlPlane) ServeEBPFInbound(readyChan chan<- bool, listeners ebpfinb
 
 // openEBPFInboundListeners is the current concrete listener implementation
 // behind the policy-neutral runtime boundary.
-func (c *ControlPlane) openEBPFInboundListeners(ctx context.Context, port uint16) (listener *Listener, err error) {
+func (c *ControlPlane) openEBPFInboundGeneration(ctx context.Context, port uint16) (listener *Listener, err error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}

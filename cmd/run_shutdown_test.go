@@ -291,22 +291,22 @@ func TestShutdownAfterSignalTypedNilResourcesAreSkipped(t *testing.T) {
 
 func TestShutdownAfterSignalWithPendingHandoffFastExitDetachesBothGenerations(t *testing.T) {
 	recorder := &shutdownCallRecorder{}
-	newListener := &fakeShutdownListener{recorder: recorder}
-	oldListener := &fakeShutdownListener{recorder: recorder}
+	newGeneration := &fakeShutdownListener{recorder: recorder}
+	oldGeneration := &fakeShutdownListener{recorder: recorder}
 	newPlane := &fakeShutdownControlPlane{recorder: recorder}
 	oldPlane := &fakeShutdownControlPlane{recorder: recorder}
 	netns := &fakeShutdownNetns{recorder: recorder}
 
 	err := shutdownAfterSignalWithHandoff(
 		newDiscardLogger(),
-		newListener,
+		newGeneration,
 		newPlane,
 		netns,
 		true,
 		&signalShutdownStagedHandoff{
-			oldListener:     oldListener,
+			oldGeneration:   oldGeneration,
 			oldControlPlane: oldPlane,
-			newListener:     newListener,
+			newGeneration:   newGeneration,
 			newControlPlane: newPlane,
 		},
 	)
@@ -530,17 +530,17 @@ func TestBeginReloadHandoffSetsReloadingBeforeNotification(t *testing.T) {
 }
 
 func TestReloadManagerBuildShutdownHandoffUsesPendingStagedHandoff(t *testing.T) {
-	oldListener := &control.Listener{}
-	newListener := &control.Listener{}
+	oldGeneration := &control.Listener{}
+	newGeneration := &control.Listener{}
 	oldPlane := &control.ControlPlane{}
 	newPlane := &control.ControlPlane{}
 
 	manager := newReloadManager(make(chan reloadRequest, 1), make(chan struct{}, 1), make(chan os.Signal, 1))
 	manager.setPendingStagedHandoff(&stagedReloadHandoff{
 		oldControlPlane: oldPlane,
-		oldListener:     oldListener,
+		oldGeneration:   oldGeneration,
 		newControlPlane: newPlane,
-		newListener:     newListener,
+		newGeneration:   newGeneration,
 	}, time.Now(), 123)
 
 	handoff := manager.buildShutdownHandoff()
@@ -550,7 +550,7 @@ func TestReloadManagerBuildShutdownHandoffUsesPendingStagedHandoff(t *testing.T)
 	if handoff.oldControlPlane != oldPlane || handoff.newControlPlane != newPlane {
 		t.Fatal("expected shutdown handoff to preserve control plane ownership")
 	}
-	if handoff.oldListener != oldListener || handoff.newListener != newListener {
+	if handoff.oldGeneration != oldGeneration || handoff.newGeneration != newGeneration {
 		t.Fatal("expected shutdown handoff to preserve listener ownership")
 	}
 }

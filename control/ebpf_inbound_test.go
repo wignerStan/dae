@@ -65,7 +65,7 @@ func (testNetListener) Accept() (net.Conn, error) { return nil, net.ErrClosed }
 func (testNetListener) Close() error              { return nil }
 func (testNetListener) Addr() net.Addr            { return &net.TCPAddr{} }
 
-type testEBPFInboundListenerSet struct {
+type testEBPFInboundGeneration struct {
 	tcp4       net.Listener
 	tcp6       net.Listener
 	udp        *net.UDPConn
@@ -73,31 +73,44 @@ type testEBPFInboundListenerSet struct {
 	closeCalls int
 }
 
-func (l *testEBPFInboundListenerSet) TCP4() net.Listener { return l.tcp4 }
-func (l *testEBPFInboundListenerSet) TCP6() net.Listener { return l.tcp6 }
-func (l *testEBPFInboundListenerSet) UDP() *net.UDPConn  { return l.udp }
-func (l *testEBPFInboundListenerSet) Port() uint16       { return l.port }
-func (l *testEBPFInboundListenerSet) Close() error {
+func (l *testEBPFInboundGeneration) TCP4() net.Listener { return l.tcp4 }
+func (l *testEBPFInboundGeneration) TCP6() net.Listener { return l.tcp6 }
+func (l *testEBPFInboundGeneration) UDP() *net.UDPConn  { return l.udp }
+func (l *testEBPFInboundGeneration) Port() uint16       { return l.port }
+func (l *testEBPFInboundGeneration) Close() error {
 	l.closeCalls++
 	return nil
 }
 
 type testEBPFInboundRuntime struct {
-	listeners   ebpfinbound.ListenerSet
+	listeners   ebpfinbound.Generation
 	openPort    uint16
 	openCalls   int
+	cloneCalls  int
+	cloneSource ebpfinbound.Generation
+	cloneResult ebpfinbound.Generation
+	cloneErr    error
 	commitCalls int
-	committed   ebpfinbound.ListenerSet
+	committed   ebpfinbound.Generation
 	commitErr   error
 }
 
-func (r *testEBPFInboundRuntime) OpenListeners(_ context.Context, port uint16) (ebpfinbound.ListenerSet, error) {
+func (r *testEBPFInboundRuntime) OpenGeneration(_ context.Context, port uint16) (ebpfinbound.Generation, error) {
 	r.openCalls++
 	r.openPort = port
 	return r.listeners, nil
 }
 
-func (r *testEBPFInboundRuntime) CommitListeners(_ context.Context, listeners ebpfinbound.ListenerSet) error {
+func (r *testEBPFInboundRuntime) CloneGeneration(_ context.Context, generation ebpfinbound.Generation) (ebpfinbound.Generation, error) {
+	r.cloneCalls++
+	r.cloneSource = generation
+	if r.cloneResult != nil || r.cloneErr != nil {
+		return r.cloneResult, r.cloneErr
+	}
+	return generation, nil
+}
+
+func (r *testEBPFInboundRuntime) CommitGeneration(_ context.Context, listeners ebpfinbound.Generation) error {
 	r.commitCalls++
 	r.committed = listeners
 	return r.commitErr
@@ -110,8 +123,8 @@ func (*testEBPFInboundRuntime) LookupMetadata(context.Context, ebpfinbound.Flow)
 func (*testEBPFInboundRuntime) OutputMark() uint32 { return 0 }
 func (*testEBPFInboundRuntime) Close() error       { return nil }
 
-func newTestEBPFInboundListenerSet() *testEBPFInboundListenerSet {
-	return &testEBPFInboundListenerSet{
+func newTestEBPFInboundGeneration() *testEBPFInboundGeneration {
+	return &testEBPFInboundGeneration{
 		tcp4: testNetListener{},
 		tcp6: testNetListener{},
 		udp:  &net.UDPConn{},
@@ -120,15 +133,15 @@ func newTestEBPFInboundListenerSet() *testEBPFInboundListenerSet {
 }
 
 func TestPrepareEBPFInboundListenersUsesRuntime(t *testing.T) {
-	listeners := newTestEBPFInboundListenerSet()
+	listeners := newTestEBPFInboundGeneration()
 	runtime := &testEBPFInboundRuntime{}
 
-	sockets, err := prepareEBPFInboundListeners(context.Background(), runtime, listeners)
+	sockets, err := prepareEBPFInboundGeneration(context.Background(), runtime, listeners)
 	if err != nil {
-		t.Fatalf("prepareEBPFInboundListeners() error = %v", err)
+		t.Fatalf("prepareEBPFInboundGeneration() error = %v", err)
 	}
 	if runtime.commitCalls != 1 || runtime.committed != listeners {
-		t.Fatalf("CommitListeners calls = %d, listener = %T", runtime.commitCalls, runtime.committed)
+		t.Fatalf("CommitGeneration calls = %d, listener = %T", runtime.commitCalls, runtime.committed)
 	}
 	if sockets.tcp4 != listeners.tcp4 || sockets.tcp6 != listeners.tcp6 || sockets.udp != listeners.udp {
 		t.Fatal("prepared sockets do not match listener set")
@@ -136,15 +149,15 @@ func TestPrepareEBPFInboundListenersUsesRuntime(t *testing.T) {
 }
 
 func TestPrepareEBPFInboundListenersValidatesBeforeCommit(t *testing.T) {
-	listeners := newTestEBPFInboundListenerSet()
+	listeners := newTestEBPFInboundGeneration()
 	listeners.udp = nil
 	runtime := &testEBPFInboundRuntime{}
 
-	if _, err := prepareEBPFInboundListeners(context.Background(), runtime, listeners); err == nil {
-		t.Fatal("prepareEBPFInboundListeners() error = nil, want missing UDP error")
+	if _, err := prepareEBPFInboundGeneration(context.Background(), runtime, listeners); err == nil {
+		t.Fatal("prepareEBPFInboundGeneration() error = nil, want missing UDP error")
 	}
 	if runtime.commitCalls != 0 {
-		t.Fatalf("CommitListeners calls = %d, want 0", runtime.commitCalls)
+		t.Fatalf("CommitGeneration calls = %d, want 0", runtime.commitCalls)
 	}
 }
 
@@ -153,11 +166,11 @@ func TestPrepareEBPFInboundListenersHonorsContext(t *testing.T) {
 	cancel()
 	runtime := &testEBPFInboundRuntime{}
 
-	if _, err := prepareEBPFInboundListeners(ctx, runtime, newTestEBPFInboundListenerSet()); !errors.Is(err, context.Canceled) {
-		t.Fatalf("prepareEBPFInboundListeners() error = %v, want %v", err, context.Canceled)
+	if _, err := prepareEBPFInboundGeneration(ctx, runtime, newTestEBPFInboundGeneration()); !errors.Is(err, context.Canceled) {
+		t.Fatalf("prepareEBPFInboundGeneration() error = %v, want %v", err, context.Canceled)
 	}
 	if runtime.commitCalls != 0 {
-		t.Fatalf("CommitListeners calls = %d, want 0", runtime.commitCalls)
+		t.Fatalf("CommitGeneration calls = %d, want 0", runtime.commitCalls)
 	}
 }
 
@@ -178,12 +191,12 @@ func TestOpenLegacyEBPFInboundListenersUsesRuntime(t *testing.T) {
 		t.Fatal("openLegacyEBPFInboundListeners() returned a different listener")
 	}
 	if runtime.openCalls != 1 || runtime.openPort != listener.port {
-		t.Fatalf("OpenListeners calls = %d, port = %d", runtime.openCalls, runtime.openPort)
+		t.Fatalf("OpenGeneration calls = %d, port = %d", runtime.openCalls, runtime.openPort)
 	}
 }
 
 func TestOpenLegacyEBPFInboundListenersClosesForeignSet(t *testing.T) {
-	listeners := newTestEBPFInboundListenerSet()
+	listeners := newTestEBPFInboundGeneration()
 	runtime := &testEBPFInboundRuntime{listeners: listeners}
 
 	if _, err := openLegacyEBPFInboundListeners(context.Background(), runtime, listeners.port); err == nil {
@@ -191,5 +204,23 @@ func TestOpenLegacyEBPFInboundListenersClosesForeignSet(t *testing.T) {
 	}
 	if listeners.closeCalls != 1 {
 		t.Fatalf("Close calls = %d, want 1", listeners.closeCalls)
+	}
+}
+
+func TestControlPlaneEBPFInboundCloneGenerationRejectsForeignGeneration(t *testing.T) {
+	plane := &ControlPlane{}
+	_, err := plane.EBPFInbound().CloneGeneration(context.Background(), newTestEBPFInboundGeneration())
+	if err == nil {
+		t.Fatal("CloneGeneration() error = nil, want ownership error")
+	}
+}
+
+func TestControlPlaneEBPFInboundCloneGenerationHonorsContext(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	plane := &ControlPlane{}
+	_, err := plane.EBPFInbound().CloneGeneration(ctx, &Listener{})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("CloneGeneration() error = %v, want %v", err, context.Canceled)
 	}
 }
