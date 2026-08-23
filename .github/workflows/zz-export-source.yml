@@ -24,10 +24,10 @@ jobs:
         run: |
           set -euo pipefail
           git rev-parse HEAD > SOURCE_COMMIT
-          tar --exclude=.git --exclude=dae-source.tar.gz -czf dae-source.tar.gz .
+          tar --exclude=.git -czf /tmp/dae-source.tar.gz .
       - uses: actions/upload-artifact@v4
         with:
           name: dae-source
-          path: dae-source.tar.gz
+          path: /tmp/dae-source.tar.gz
           if-no-files-found: error
           retention-days: 1
