@@ -1,0 +1,72 @@
+name: Apply sing-box datapath integration
+
+on:
+  push:
+    branches:
+      - feat/sing-box-policy-handoff
+  pull_request:
+    branches:
+      - main
+    types:
+      - opened
+      - reopened
+      - synchronize
+
+permissions:
+  contents: write
+
+concurrency:
+  group: dae-sing-box-integration-${{ github.head_ref || github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  apply:
+    if: >-
+      github.actor != 'github-actions[bot]' &&
+      (github.head_ref == 'feat/sing-box-policy-handoff' || github.ref_name == 'feat/sing-box-policy-handoff')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out feature head
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+
+      - name: Apply prepared integration commit
+        shell: bash
+        env:
+          BASE_SHA: caa6f5e91776bc86d5b0edc940bb7d264359863c
+          HEAD_BRANCH: ${{ github.head_ref || github.ref_name }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          PATCH_FILE: .integration/0001-dae-external-sing-box-policy-handoff.patch.gz.b64
+        run: |
+          set -euo pipefail
+          base64 --decode "$PATCH_FILE" | gzip --decompress > /tmp/dae-integration.patch
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -B "$HEAD_BRANCH" "$HEAD_SHA"
+          git reset --hard "$BASE_SHA"
+          git clean -fdx
+          git am /tmp/dae-integration.patch
+          git diff --check "$BASE_SHA"..HEAD
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Run focused tests
+        shell: bash
+        run: go test ./common/daeipc ./control
+
+      - name: Publish clean feature commit
+        shell: bash
+        env:
+          HEAD_BRANCH: ${{ github.head_ref || github.ref_name }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          set -euo pipefail
+          git push \
+            --force-with-lease="refs/heads/${HEAD_BRANCH}:${HEAD_SHA}" \
+            origin "HEAD:refs/heads/${HEAD_BRANCH}"
