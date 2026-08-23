@@ -38,6 +38,7 @@ jobs:
           git clean -fdx
 
       - name: Apply repository AutoCorrect rules
+        continue-on-error: true
         uses: huacnlee/autocorrect-action@v2
 
       - name: Verify and squash the documentation change
