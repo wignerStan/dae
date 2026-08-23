@@ -58,7 +58,7 @@ jobs:
 
       - name: Run focused tests
         shell: bash
-        run: go test ./common/daeipc ./control
+        run: go test -tags dae_stub_ebpf ./common/daeipc ./control
 
       - name: Publish clean feature commit
         shell: bash
