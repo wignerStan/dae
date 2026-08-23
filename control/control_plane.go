@@ -111,6 +111,8 @@ type ControlPlane struct {
 	routingKernspaceSnapshot       *routingKernspaceSnapshot
 	pendingDnsReloadCache          map[string]*DnsCache
 	sharedBpfReload                bool
+	externalPolicySocket           string
+	externalPolicyUID              uint32
 	closeOnce                      sync.Once
 	closeErr                       error
 }
@@ -378,6 +380,19 @@ func newControlPlaneWithContextOptions(
 		}
 	}
 
+	externalPolicySocket := strings.TrimSpace(os.Getenv(externalPolicySocketEnv))
+	var externalPolicyUID uint32
+	if externalPolicySocket != "" {
+		externalPolicyUID, err = configuredExternalPolicyUID()
+		if err != nil {
+			return nil, err
+		}
+		log.WithFields(logrus.Fields{
+			"socket": externalPolicySocket,
+			"uid":    externalPolicyUID,
+		}).Info("External policy mode enabled; sing-box owns userspace routing, DNS, and sniffing")
+	}
+
 	// Register the cache clear function with dialer package so health checks
 	// can clear the failed DCID cache when network conditions improve.
 	dialer.SetQuicDcidCacheClearFunc(ClearFailedQuicDcids)
@@ -483,6 +498,7 @@ func newControlPlaneWithContextOptions(
 			PinPath:                pinPath,
 			CollectionOptions:      collectionOpts,
 			ConnStateMapMaxEntries: global.BpfConnStateMapSize,
+			ExternalPolicy:         externalPolicySocket != "",
 		}, global.SoMarkFromDae); err != nil {
 			if log.Level == logrus.PanicLevel {
 				log.Panicln(err)
@@ -723,6 +739,8 @@ func newControlPlaneWithContextOptions(
 		routingKernspaceSnapshot:    kernspaceSnapshot,
 		preparedDatapathCommit:      buildOpts.delayDatapathCommit,
 		sharedBpfReload:             _bpf != nil,
+		externalPolicySocket:        externalPolicySocket,
+		externalPolicyUID:           externalPolicyUID,
 		pendingDnsReloadCache:       dnsCache,
 		muRealDomainSet:             sync.RWMutex{},
 		realDomainSet:               bloom.NewWithEstimates(2048, 0.001),
@@ -2983,16 +3001,32 @@ func (c *ControlPlane) Serve(readyChan chan<- bool, listener *Listener) (err err
 			}
 		}
 	}()
-	udpConn := listener.packetConn.(*net.UDPConn)
 	if err := c.CommitPreparedDatapath(); err != nil {
 		return err
 	}
 	if err := c.publishListenerSockets(listener); err != nil {
 		return err
 	}
+	if c.externalPolicySocket != "" {
+		c.publishRuntimeStats()
+		session, sessionErr := c.openExternalPolicySession(listener)
+		if sessionErr != nil {
+			c.unpublishRuntimeStats()
+			return sessionErr
+		}
+		c.markReady()
+		sentReady = true
+		select {
+		case readyChan <- true:
+		default:
+		}
+		c.logExternalPolicyReady(session)
+		return c.serveExternalPolicySession(session)
+	}
 	if err := c.activatePreparedRuntime(); err != nil {
 		return err
 	}
+	udpConn := listener.packetConn.(*net.UDPConn)
 
 	c.markReady()
 	sentReady = true

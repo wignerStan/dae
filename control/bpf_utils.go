@@ -373,6 +373,7 @@ type loadBpfOptions struct {
 	BigEndianTproxyPort    uint32
 	CollectionOptions      *ebpf.CollectionOptions
 	ConnStateMapMaxEntries uint32
+	ExternalPolicy         bool
 }
 
 const (
@@ -530,6 +531,10 @@ retryLoadBpf:
 	} else {
 		log.Warnf("Kernel does not support bpf_get_current_task helper: %v; process names may be truncated or less accurate (degraded to bpf_get_current_comm)", err)
 	}
+	externalPolicy := uint8(0)
+	if opts.ExternalPolicy {
+		externalPolicy = 1
+	}
 
 	constants := map[string]interface{}{
 		"PARAM": struct {
@@ -541,7 +546,8 @@ retryLoadBpf:
 			paddingAfterMac      [2]uint8
 			useRedirectPeer      uint8
 			hasBpfGetCurrentTask uint8
-			padding2             uint16
+			externalPolicy       uint8
+			padding2             uint8
 			daeSocketMark        uint32
 		}{
 			tproxyPort:           opts.BigEndianTproxyPort,
@@ -552,6 +558,7 @@ retryLoadBpf:
 			paddingAfterMac:      [2]uint8{0, 0},
 			useRedirectPeer:      useRedirectPeer,
 			hasBpfGetCurrentTask: hasBpfGetCurrentTask,
+			externalPolicy:       externalPolicy,
 			padding2:             0,
 			daeSocketMark:        soMarkFromDae,
 		},

@@ -169,7 +169,8 @@ struct dae_param {
 	__u8 padding_after_mac[2]; // pad to align use_redirect_peer
 	__u8 use_redirect_peer;
 	__u8 has_bpf_get_current_task;
-	__u16 padding2;
+	__u8 external_policy;
+	__u8 padding2;
 	// dae_socket_mark is set on dae's own sockets (Anyfrom pool) to identify them.
 	// When bpf_sk_lookup_* finds a socket, we check this mark to skip dae's own sockets.
 	// This prevents false positives in NAT loopback detection for transparent proxying.
@@ -1411,6 +1412,13 @@ static __noinline __s64 route(const __u32 *flag, const void *l4hdr,
 			      const __be32 *saddr, const __be32 *daddr,
 			      const __be32 *mac)
 {
+	/* In external policy mode the kernel is capture-only. sing-box is the
+	 * sole routing, DNS, FakeIP, and sniffing authority, so every captured
+	 * flow must reach its userspace listener. Self-mark and control-plane PID
+	 * exclusions are applied before route() by the ingress/egress programs. */
+	if (unlikely(PARAM.external_policy))
+		return (__s64)OUTBOUND_CONTROL_PLANE_ROUTING;
+
 #define _l4proto_type flag[0]
 #define _ipversion_type flag[1]
 #define _pname (&flag[2])
