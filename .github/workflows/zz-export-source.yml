@@ -1,0 +1,27 @@
+name: Export source snapshot
+
+on:
+  push:
+    branches:
+      - tmp/export-ebpf-runtime-source
+
+permissions:
+  contents: read
+
+jobs:
+  export:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          submodules: recursive
+      - name: Archive source
+        run: |
+          tar --exclude=.git -czf dae-source.tar.gz .
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dae-source
+          path: dae-source.tar.gz
+          if-no-files-found: error
+          retention-days: 1
