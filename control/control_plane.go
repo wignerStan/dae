@@ -119,6 +119,7 @@ type ControlPlane struct {
 type controlPlaneBuildOptions struct {
 	delayDatapathCommit   bool
 	delayDNSListenerStart bool
+	externalPolicy        bool
 }
 
 const (
@@ -484,6 +485,7 @@ func newControlPlaneWithContextOptions(
 			PinPath:                pinPath,
 			CollectionOptions:      collectionOpts,
 			ConnStateMapMaxEntries: global.BpfConnStateMapSize,
+			ExternalPolicy:         buildOpts.externalPolicy,
 		}, global.SoMarkFromDae); err != nil {
 			if log.Level == logrus.PanicLevel {
 				log.Panicln(err)

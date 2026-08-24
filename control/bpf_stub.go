@@ -35,7 +35,8 @@ type bpfDaeParam struct {
 	PaddingAfterMac      [2]uint8
 	UseRedirectPeer      uint8 // 0=use bpf_redirect(), 1=use bpf_redirect_peer() when safe
 	HasBpfGetCurrentTask uint8
-	Padding2             uint16
+	ExternalPolicy       uint8 // 1=send all captured flows to the external userspace policy engine
+	Padding2             uint8
 	DaeSocketMark        uint32 // mark set on dae's own sockets to identify them in eBPF
 }
 
@@ -349,6 +350,7 @@ type loadBpfOptions struct {
 	BigEndianTproxyPort    uint32
 	CollectionOptions      *ebpf.CollectionOptions
 	ConnStateMapMaxEntries uint32
+	ExternalPolicy         bool
 }
 
 const (
