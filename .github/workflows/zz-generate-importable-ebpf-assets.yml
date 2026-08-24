@@ -1,0 +1,52 @@
+name: Generate importable eBPF assets
+
+on:
+  pull_request:
+    branches:
+      - refactor/ebpf-inbound-generation
+
+permissions:
+  contents: write
+
+concurrency:
+  group: generate-importable-ebpf-assets
+  cancel-in-progress: false
+
+jobs:
+  generate:
+    if: github.head_ref == 'refactor/ebpf-inbound-standalone' && github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: refactor/ebpf-inbound-standalone
+          fetch-depth: 0
+          submodules: recursive
+      - uses: actions/setup-go@v6
+        with:
+          go-version: 1.26.0
+          cache: true
+      - name: Install eBPF toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang llvm
+      - name: Generate and validate importable assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          make ebpf
+          test -s control/bpf_bpfel.go
+          test -s control/bpf_bpfel.o
+          test -s control/bpf_bpfeb.go
+          test -s control/bpf_bpfeb.o
+          git add -f control/bpf_bpfel.go control/bpf_bpfel.o control/bpf_bpfeb.go control/bpf_bpfeb.o
+          git diff --cached --check
+          go test ./pkg/ebpfinbound/... ./control
+      - name: Publish assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name Jacob
+          git config user.email 240170694+wignerStan@users.noreply.github.com
+          git commit -m 'build(ebpfinbound): embed generated BPF assets'
+          git push origin HEAD:refactor/ebpf-inbound-standalone
