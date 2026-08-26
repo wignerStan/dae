@@ -1,0 +1,71 @@
+name: Publish standalone eBPF inbound module
+
+on:
+  push:
+    branches:
+      - refactor/ebpf-inbound-module
+
+permissions:
+  contents: write
+
+concurrency:
+  group: publish-ebpfinbound-module
+  cancel-in-progress: true
+
+jobs:
+  publish:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: refactor/ebpf-inbound-module
+          fetch-depth: 0
+      - uses: actions/setup-go@v6
+        with:
+          go-version: 1.26.0
+          cache: false
+      - name: Reconstruct, validate, and publish module
+        shell: bash
+        run: |
+          set -euo pipefail
+          base64 -d .github/ebpfinbound-module/module.tar.gz.b64 > /tmp/ebpfinbound-module.tar.gz
+          echo '94be55db2bbe5d3731c4375d7bb7ffdafffeaa340d1ca62418a9661f53656bbe  /tmp/ebpfinbound-module.tar.gz' | sha256sum -c -
+
+          git reset --hard 23924b96e4cf7a75586b7d5e51f5b86c7a212acf
+          rm -rf ebpfinbound
+          mkdir -p ebpfinbound
+          cp pkg/ebpfinbound/api.go ebpfinbound/api.go
+          cp pkg/ebpfinbound/capture.go ebpfinbound/capture.go
+          cp pkg/ebpfinbound/oob_linux.go ebpfinbound/oob_linux.go
+          cp pkg/ebpfinbound/oob_other.go ebpfinbound/oob_other.go
+          cp pkg/ebpfinbound/api_test.go ebpfinbound/api_test.go
+          cp pkg/ebpfinbound/capture_test.go ebpfinbound/capture_test.go
+          cp pkg/ebpfinbound/oob_linux_test.go ebpfinbound/oob_linux_test.go
+          cp control/bpf_bpfel.go ebpfinbound/bpf_bpfel.go
+          cp control/bpf_bpfeb.go ebpfinbound/bpf_bpfeb.go
+          cp control/bpf_bpfel.o ebpfinbound/bpf_bpfel.o
+          cp control/bpf_bpfeb.o ebpfinbound/bpf_bpfeb.o
+          sed -i 's/^package control$/package ebpfinbound/' ebpfinbound/bpf_bpfel.go ebpfinbound/bpf_bpfeb.go
+          tar -xzf /tmp/ebpfinbound-module.tar.gz
+          cp go.sum ebpfinbound/go.sum
+
+          cd ebpfinbound
+          go mod tidy
+          find . -name '*.go' -print0 | xargs -0 gofmt -w
+          go test ./...
+          go vet ./...
+
+          deps=$(go list -deps ./...)
+          if grep -E 'github.com/daeuniverse/dae/(control|config|common|component|cmd|pkg)|github.com/daeuniverse/outbound|github.com/olicesx/quic-go|github.com/quic-go/qpack|github.com/sirupsen/logrus' <<<"$deps"; then
+            echo 'forbidden daemon/policy dependency leaked into standalone module' >&2
+            exit 1
+          fi
+          cd ..
+
+          git add ebpfinbound
+          git diff --cached --check
+          git config user.name Jacob
+          git config user.email 240170694+wignerStan@users.noreply.github.com
+          git commit -m 'refactor(ebpf): extract standalone inbound module'
+          git push --force origin HEAD:refactor/ebpf-inbound-module
