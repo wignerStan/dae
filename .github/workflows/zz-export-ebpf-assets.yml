@@ -1,0 +1,31 @@
+name: Export eBPF assets
+
+on:
+  push:
+    branches:
+      - tmp-export-ebpf-assets
+
+permissions:
+  contents: read
+
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: tmp-export-ebpf-assets
+      - name: Archive tracked assets
+        run: |
+          tar -czf /tmp/dae-ebpf-assets.tar.gz \
+            control/bpf_bpfel.go control/bpf_bpfel.o \
+            control/bpf_bpfeb.go control/bpf_bpfeb.o \
+            pkg/ebpfinbound
+          sha256sum /tmp/dae-ebpf-assets.tar.gz > /tmp/SHA256SUMS
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dae-ebpf-assets
+          path: |
+            /tmp/dae-ebpf-assets.tar.gz
+            /tmp/SHA256SUMS
+          retention-days: 7
