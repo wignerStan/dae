@@ -28,8 +28,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          base64 -d .github/ebpfinbound-module/module.tar.gz.b64 > /tmp/ebpfinbound-module.tar.gz
+          cat .github/ebpfinbound-module/part-* | base64 -d > /tmp/ebpfinbound-module.tar.gz
           sha256sum /tmp/ebpfinbound-module.tar.gz | tee /tmp/ebpfinbound-module.sha256
+          gzip -t /tmp/ebpfinbound-module.tar.gz
 
           git reset --hard 23924b96e4cf7a75586b7d5e51f5b86c7a212acf
           rm -rf ebpfinbound
@@ -50,6 +51,7 @@ jobs:
           cp go.sum ebpfinbound/go.sum
           tar -czf /tmp/ebpfinbound-recovered.tar.gz ebpfinbound
       - name: Upload recovered module
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: ebpfinbound-recovered
@@ -57,9 +59,9 @@ jobs:
             /tmp/ebpfinbound-module.tar.gz
             /tmp/ebpfinbound-module.sha256
             /tmp/ebpfinbound-recovered.tar.gz
+          if-no-files-found: warn
           retention-days: 7
       - name: Validate candidate
-        continue-on-error: true
         shell: bash
         run: |
           set -euxo pipefail
