@@ -1,0 +1,107 @@
+name: Bootstrap standalone eBPF inbound
+
+on:
+  push:
+    branches:
+      - feat/standalone-ebpf-inbound
+
+permissions:
+  contents: write
+
+concurrency:
+  group: bootstrap-standalone-ebpfinbound
+  cancel-in-progress: true
+
+jobs:
+  build-publish:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: feat/standalone-ebpf-inbound
+          fetch-depth: 0
+          submodules: recursive
+      - uses: actions/setup-go@v6
+        with:
+          go-version: 1.26.0
+          cache: false
+      - name: Install eBPF toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang llvm libbpf-dev
+      - name: Reconstruct standalone module
+        shell: bash
+        run: |
+          set -euxo pipefail
+          rm -rf ebpfinbound
+          mkdir -p ebpfinbound
+          base64 -d .github/ebpfinbound-bootstrap/payload.tar.gz.b64 | tar -xz -C ebpfinbound
+          python3 - <<'PY'
+          from pathlib import Path
+          path = Path('ebpfinbound/runtime_linux.go')
+          text = path.read_text()
+          old = '\tcommitted       bool\n\tclosed          bool\n'
+          new = '\tcommitted       bool\n\tcommitting      bool\n\tclosed          bool\n'
+          if old not in text:
+              raise SystemExit('runtime state marker not found')
+          path.write_text(text.replace(old, new, 1))
+          PY
+      - name: Generate current BPF bindings and objects
+        shell: bash
+        run: |
+          set -euxo pipefail
+          rm -f control/bpf_bpfel.go control/bpf_bpfel.o control/bpf_bpfeb.go control/bpf_bpfeb.o
+          BPF_CLANG=clang \
+          BPF_STRIP_FLAG=-no-strip \
+          BPF_CFLAGS='-DMAX_MATCH_SET_LEN=1024 -O2 -Wall -Werror' \
+          BPF_TARGET='bpfel,bpfeb' \
+            go generate ./control/control.go
+          cp control/bpf_bpfel.go control/bpf_bpfel.o control/bpf_bpfeb.go control/bpf_bpfeb.o ebpfinbound/
+          sed -i 's/^package control$/package ebpfinbound/' ebpfinbound/bpf_bpfel.go ebpfinbound/bpf_bpfeb.go
+          python3 - <<'PY'
+          from pathlib import Path
+          for name in ('bpf_bpfel.go', 'bpf_bpfeb.go'):
+              path = Path('ebpfinbound') / name
+              text = path.read_text()
+              lines = text.splitlines()
+              for index, line in enumerate(lines):
+                  if line.startswith('//go:build '):
+                      expr = line[len('//go:build '):]
+                      if not expr.startswith('linux && '):
+                          lines[index] = '//go:build linux && (' + expr + ')'
+                      break
+              else:
+                  raise SystemExit(f'build tag missing from {name}')
+              path.write_text('\n'.join(lines) + '\n')
+          PY
+      - name: Validate standalone dependency boundary
+        working-directory: ebpfinbound
+        shell: bash
+        run: |
+          set -euxo pipefail
+          go mod tidy
+          find . -name '*.go' -print0 | xargs -0 gofmt -w
+          go test ./...
+          go vet ./...
+          deps=$(go list -deps ./...)
+          if grep -E 'github.com/daeuniverse/dae/(control|config|common|component|cmd|pkg)|github.com/daeuniverse/outbound|github.com/olicesx/quic-go|github.com/quic-go/qpack|github.com/sirupsen/logrus' <<<"$deps"; then
+            echo 'forbidden daemon, policy, outbound, QUIC, or logging dependency leaked into standalone module' >&2
+            exit 1
+          fi
+      - name: Privileged lifecycle smoke test
+        working-directory: ebpfinbound
+        shell: bash
+        run: |
+          set -euxo pipefail
+          sudo --preserve-env=PATH env HOME="$HOME" go test -tags=integration -run TestPrivilegedRuntimeLifecycle -count=1 -v .
+      - name: Commit validated module
+        shell: bash
+        run: |
+          set -euxo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git rm -r .github/ebpfinbound-bootstrap .github/workflows/zz-bootstrap-ebpfinbound.yml
+          git add ebpfinbound
+          git add -f ebpfinbound/bpf_bpfel.go ebpfinbound/bpf_bpfel.o ebpfinbound/bpf_bpfeb.go ebpfinbound/bpf_bpfeb.o
+          git commit -m 'feat(ebpf): add standalone transparent inbound runtime'
+          git push origin HEAD:feat/standalone-ebpf-inbound
