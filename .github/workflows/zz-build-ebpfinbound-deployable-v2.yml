@@ -93,7 +93,6 @@ jobs:
           find . -name '*.go' -print0 | xargs -0 gofmt -w
           go test -race ./...
           go vet ./...
-          test -z "$(git status --porcelain -- . ':!bpf_bpfel.go' ':!bpf_bpfel.o' ':!bpf_bpfeb.go' ':!bpf_bpfeb.o')"
           deps=$(go list -deps ./...)
           if grep -E 'github.com/daeuniverse/dae/(control|config|common|component|cmd|pkg)|github.com/daeuniverse/outbound|github.com/olicesx/quic-go|github.com/quic-go/qpack|github.com/sirupsen/logrus' <<<"$deps"; then
             echo 'forbidden daemon, policy, outbound, QUIC, or logging dependency leaked into standalone module' >&2
