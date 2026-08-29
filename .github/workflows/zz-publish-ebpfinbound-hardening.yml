@@ -1,0 +1,250 @@
+name: Publish linear eBPF inbound hardening
+
+on:
+  push:
+    branches:
+      - tmp-hardening-publisher
+
+permissions:
+  contents: write
+
+concurrency:
+  group: publish-ebpfinbound-hardening
+  cancel-in-progress: true
+
+jobs:
+  publish:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: tmp-hardening-publisher
+          fetch-depth: 0
+          submodules: recursive
+      - uses: actions/setup-go@v6
+        with:
+          go-version: 1.26.0
+          cache: false
+      - name: Build and publish one linear commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          BASE=5db27a0028d36e7847bd3796497df952337a20e2
+          git reset --hard "$BASE"
+          git config user.name Jacob
+          git config user.email 240170694+wignerStan@users.noreply.github.com
+
+          for commit in \
+            02c7fca159ce24531afe1302be595677f0c6f8cd \
+            24ec9013a2c5b5720f515f68118e772ba3017d16 \
+            e99665c7e2dadc80c1f7c5b842fc86bd89354751 \
+            23924b96e4cf7a75586b7d5e51f5b86c7a212acf
+          do
+            if ! git cherry-pick "$commit"; then
+              git checkout --theirs -- .
+              git add -A
+              GIT_EDITOR=true git cherry-pick --continue
+            fi
+          done
+
+          python3 <<'PY'
+          from pathlib import Path
+
+          root = Path('.')
+          p = root / 'pkg/ebpfinbound/capture.go'
+          s = p.read_text()
+          if 'AllowLazyInterfaces' not in s:
+              s = s.replace('ConnectionStateMapEntries uint32\n', 'ConnectionStateMapEntries uint32\n\tAllowLazyInterfaces       bool\n\tResourceLockPath          string\n')
+              s = s.replace('DefaultConnStateEntries = uint32(262144)', 'DefaultConnStateEntries = uint32(262144)\n\tDefaultResourceLockPath   = "/run/dae/ebpfinbound.lock"')
+              s = s.replace('if c.ConnectionStateMapEntries == 0 {', 'if c.ResourceLockPath == "" {\n\t\tc.ResourceLockPath = DefaultResourceLockPath\n\t}\n\tif c.ConnectionStateMapEntries == 0 {')
+          p.write_text(s)
+
+          (root / 'pkg/ebpfinbound/preflight_linux.go').write_text(r'''//go:build linux
+
+          package ebpfinbound
+
+          import (
+              "errors"
+              "fmt"
+              "path"
+              "sort"
+              "strings"
+
+              "github.com/vishvananda/netlink"
+              "golang.org/x/sys/unix"
+          )
+
+          type InterfacePreflight struct {
+              LAN     []string
+              WAN     []string
+              Waiting []string
+          }
+
+          func ResolveCaptureInterfaces(raw CaptureConfig) (CaptureConfig, InterfacePreflight, error) {
+              config := raw.WithDefaults()
+              links, err := netlink.LinkList()
+              if err != nil { return config, InterfacePreflight{}, fmt.Errorf("list network interfaces: %w", err) }
+              byName := make(map[string]netlink.Link, len(links))
+              names := make([]string, 0, len(links))
+              for _, link := range links {
+                  if link == nil || link.Attrs() == nil || link.Attrs().Name == "" { continue }
+                  name := link.Attrs().Name
+                  if name == "lo" || name == "dae0" || name == "dae0peer" { continue }
+                  byName[name] = link
+                  names = append(names, name)
+              }
+              sort.Strings(names)
+              autoWAN, autoErr := defaultRouteInterfaces(byName)
+              resolve := func(kind string, patterns []string, allowAuto bool) ([]string, []string, error) {
+                  resolved := make([]string, 0, len(patterns))
+                  waiting := make([]string, 0)
+                  for _, rawPattern := range patterns {
+                      pattern := strings.TrimSpace(rawPattern)
+                      if pattern == "" { continue }
+                      if pattern == "auto" {
+                          if !allowAuto { return nil, nil, fmt.Errorf("%s interface does not support auto", kind) }
+                          if autoErr != nil { return nil, nil, autoErr }
+                          if len(autoWAN) == 0 { return nil, nil, errors.New("no default-route interface found for wan_interface=auto") }
+                          resolved = append(resolved, autoWAN...)
+                          continue
+                      }
+                      if _, err := path.Match(pattern, ""); err != nil { return nil, nil, fmt.Errorf("invalid %s interface pattern %q: %w", kind, pattern, err) }
+                      matched := false
+                      for _, name := range names {
+                          ok, _ := path.Match(pattern, name)
+                          if ok { matched = true; resolved = append(resolved, name) }
+                      }
+                      if !matched {
+                          if !config.AllowLazyInterfaces { return nil, nil, fmt.Errorf("%s interface pattern %q matches no current interface", kind, pattern) }
+                          waiting = append(waiting, pattern)
+                          resolved = append(resolved, pattern)
+                      }
+                  }
+                  sort.Strings(resolved)
+                  resolved = compactStrings(resolved)
+                  sort.Strings(waiting)
+                  waiting = compactStrings(waiting)
+                  return resolved, waiting, nil
+              }
+              lan, lanWaiting, err := resolve("LAN", config.LANInterfaces, false)
+              if err != nil { return config, InterfacePreflight{}, err }
+              wan, wanWaiting, err := resolve("WAN", config.WANInterfaces, true)
+              if err != nil { return config, InterfacePreflight{}, err }
+              if len(lan) == 0 && len(wan) == 0 { return config, InterfacePreflight{}, errors.New("no capture interface resolved") }
+              config.LANInterfaces = lan
+              config.WANInterfaces = wan
+              return config, InterfacePreflight{LAN: append([]string(nil), lan...), WAN: append([]string(nil), wan...), Waiting: append(lanWaiting, wanWaiting...)}, nil
+          }
+
+          func compactStrings(values []string) []string {
+              if len(values) < 2 { return values }
+              result := values[:1]
+              for _, value := range values[1:] { if value != result[len(result)-1] { result = append(result, value) } }
+              return result
+          }
+
+          func defaultRouteInterfaces(byName map[string]netlink.Link) ([]string, error) {
+              routes, err := netlink.RouteListFiltered(unix.AF_UNSPEC, &netlink.Route{}, 0)
+              if err != nil { return nil, fmt.Errorf("list default routes: %w", err) }
+              indices := make(map[int]struct{})
+              for _, route := range routes {
+                  if route.LinkIndex <= 0 || route.Table == unix.RT_TABLE_LOCAL { continue }
+                  if route.Dst != nil && route.Dst.String() != "0.0.0.0/0" && route.Dst.String() != "::/0" { continue }
+                  indices[route.LinkIndex] = struct{}{}
+              }
+              result := make([]string, 0, len(indices))
+              for name, link := range byName { if _, ok := indices[link.Attrs().Index]; ok { result = append(result, name) } }
+              sort.Strings(result)
+              return result, nil
+          }
+          ''')
+          (root / 'pkg/ebpfinbound/preflight_other.go').write_text('//go:build !linux\n\npackage ebpfinbound\n\nimport "errors"\n\ntype InterfacePreflight struct { LAN, WAN, Waiting []string }\n\nfunc ResolveCaptureInterfaces(config CaptureConfig) (CaptureConfig, InterfacePreflight, error) {\n\treturn config, InterfacePreflight{}, errors.New("dae eBPF capture is only available on Linux")\n}\n')
+
+          (root / 'control/ebpf_capture_lock_linux.go').write_text(r'''//go:build linux
+
+          package control
+
+          import (
+              "errors"
+              "fmt"
+              "os"
+              "path/filepath"
+              "strconv"
+
+              "github.com/vishvananda/netlink"
+              "github.com/vishvananda/netns"
+              "golang.org/x/sys/unix"
+          )
+
+          type captureOwnership struct { file *os.File }
+
+          func acquireCaptureOwnership(lockPath string) (*captureOwnership, error) {
+              if lockPath == "" { return nil, errors.New("empty capture ownership lock path") }
+              if err := os.MkdirAll(filepath.Dir(lockPath), 0o755); err != nil { return nil, fmt.Errorf("create capture lock directory: %w", err) }
+              file, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o600)
+              if err != nil { return nil, fmt.Errorf("open capture ownership lock: %w", err) }
+              if err = unix.Flock(int(file.Fd()), unix.LOCK_EX|unix.LOCK_NB); err != nil { _ = file.Close(); return nil, fmt.Errorf("another dae capture runtime owns %s: %w", lockPath, err) }
+              fail := func(err error) (*captureOwnership, error) { _ = unix.Flock(int(file.Fd()), unix.LOCK_UN); _ = file.Close(); return nil, err }
+              if link, linkErr := netlink.LinkByName(HostVethName); linkErr == nil && link != nil { return fail(fmt.Errorf("refuse to replace existing link %s; stop standalone dae or clean stale resources", HostVethName)) }
+              if handle, nsErr := netns.GetFromName(NsName); nsErr == nil { _ = handle.Close(); return fail(fmt.Errorf("refuse to replace existing network namespace %s; stop standalone dae or clean stale resources", NsName)) }
+              if err = file.Truncate(0); err == nil { _, err = file.WriteString("pid=" + strconv.Itoa(os.Getpid()) + "\n") }
+              if err != nil { return fail(fmt.Errorf("write capture ownership metadata: %w", err)) }
+              _ = file.Sync()
+              return &captureOwnership{file: file}, nil
+          }
+
+          func (o *captureOwnership) Close() error {
+              if o == nil || o.file == nil { return nil }
+              var errs []error
+              if err := unix.Flock(int(o.file.Fd()), unix.LOCK_UN); err != nil { errs = append(errs, err) }
+              if err := o.file.Close(); err != nil { errs = append(errs, err) }
+              o.file = nil
+              return errors.Join(errs...)
+          }
+          ''')
+
+          p = root / 'control/ebpf_capture_runtime.go'
+          s = p.read_text()
+          if 'ownership *captureOwnership' not in s:
+              s = s.replace('netns *DaeNetns\n', 'netns *DaeNetns\n\townership *captureOwnership\n')
+          needle = 'capture := raw.WithDefaults()\n\tif err := capture.Validate(); err != nil {\n\t\treturn nil, err\n\t}'
+          replacement = 'capture := raw.WithDefaults()\n\tif err := capture.Validate(); err != nil {\n\t\treturn nil, err\n\t}\n\tvar preflight ebpfinbound.InterfacePreflight\n\tvar err error\n\tcapture, preflight, err = ebpfinbound.ResolveCaptureInterfaces(capture)\n\tif err != nil { return nil, fmt.Errorf("preflight capture interfaces: %w", err) }\n\tif log == nil { log = logrus.New() }\n\tif len(preflight.Waiting) > 0 { log.WithField("patterns", preflight.Waiting).Warn("dae capture is waiting for lazy interfaces") }\n\townership, err := acquireCaptureOwnership(capture.ResourceLockPath)\n\tif err != nil { return nil, err }'
+          s = s.replace(needle, replacement)
+          s = s.replace('return nil, errors.New("initialize dae network namespace")', '_ = ownership.Close()\n\t\treturn nil, errors.New("initialize dae network namespace")')
+          s = s.replace('return nil, fmt.Errorf("setup dae network namespace: %w", err)', '_ = ownership.Close()\n\t\treturn nil, fmt.Errorf("setup dae network namespace: %w", err)')
+          s = s.replace('_ = netns.Close()\n\t\treturn nil, fmt.Errorf("build capture-only control plane: %w", err)', '_ = netns.Close()\n\t\tResetDaeNetns(netns)\n\t\t_ = ownership.Close()\n\t\treturn nil, fmt.Errorf("build capture-only control plane: %w", err)')
+          s = s.replace('return &captureRuntime{inner: plane.EBPFInbound(), netns: netns}, nil', 'return &captureRuntime{inner: plane.EBPFInbound(), netns: netns, ownership: ownership}, nil')
+          s = s.replace('\t\t\tr.inner = nil\n\t\t\tr.netns = nil', '\t\t\tResetDaeNetns(r.netns)\n\t\t\tif r.ownership != nil { if err := r.ownership.Close(); err != nil { errs = append(errs, err) } }\n\t\t\tr.inner = nil\n\t\t\tr.netns = nil\n\t\t\tr.ownership = nil')
+          p.write_text(s)
+
+          p = root / 'control/netns.go'
+          s = p.read_text()
+          if '"errors"' not in s.split('import (', 1)[1].split(')', 1)[0]: s = s.replace('import (\n', 'import (\n\t"errors"\n', 1)
+          s = s.replace('daeNetns *DaeNetns\n\tonce     sync.Once', 'daeNetns   *DaeNetns\n\tdaeNetnsMu sync.Mutex')
+          s = s.replace('func InitDaeNetns(log *logrus.Logger) {\n\tonce.Do(func() {\n\t\tdaeNetns = &DaeNetns{}\n\t})', 'func InitDaeNetns(log *logrus.Logger) {\n\tdaeNetnsMu.Lock()\n\tdefer daeNetnsMu.Unlock()\n\tif daeNetns == nil { daeNetns = &DaeNetns{} }')
+          s = s.replace('func GetDaeNetns() *DaeNetns {\n\treturn daeNetns\n}', 'func GetDaeNetns() *DaeNetns {\n\tdaeNetnsMu.Lock()\n\tdefer daeNetnsMu.Unlock()\n\treturn daeNetns\n}\n\nfunc ResetDaeNetns(expected *DaeNetns) {\n\tdaeNetnsMu.Lock()\n\tdefer daeNetnsMu.Unlock()\n\tif daeNetns == expected { daeNetns = nil }\n}')
+          old = 'func (ns *DaeNetns) Close() (err error) {\n\tif ns == nil {\n\t\treturn nil\n\t}\n\t_ = DeleteNamedNetns(NsName)\n\t_ = DeleteLink(HostVethName)\n\treturn\n}'
+          new = 'func (ns *DaeNetns) Close() error {\n\tif ns == nil { return nil }\n\tns.mu.Lock()\n\tdefer ns.mu.Unlock()\n\tvar errs []error\n\t_ = DeleteNamedNetns(NsName)\n\t_ = DeleteLink(HostVethName)\n\tif int(ns.daeNs) >= 0 { if err := ns.daeNs.Close(); err != nil { errs = append(errs, err) } }\n\tif int(ns.hostNs) >= 0 { if err := ns.hostNs.Close(); err != nil { errs = append(errs, err) } }\n\tns.dae0, ns.dae0peer = nil, nil\n\tns.hostNs, ns.daeNs = -1, -1\n\tns.setupDone.Store(false)\n\treturn errors.Join(errs...)\n}'
+          s = s.replace(old, new)
+          p.write_text(s)
+
+          (root / 'pkg/ebpfinbound/preflight_linux_test.go').write_text('//go:build linux\n\npackage ebpfinbound\n\nimport "testing"\n\nfunc TestResolveCaptureInterfacesRejectsInvalidPattern(t *testing.T) {\n\t_, _, err := ResolveCaptureInterfaces(CaptureConfig{LANInterfaces: []string{"["}})\n\tif err == nil { t.Fatal("expected invalid pattern error") }\n}\n\nfunc TestCaptureConfigDefaultsResourceLock(t *testing.T) {\n\tconfig := (CaptureConfig{}).WithDefaults()\n\tif config.ResourceLockPath != DefaultResourceLockPath { t.Fatalf("lock path = %q", config.ResourceLockPath) }\n}\n')
+          PY
+
+          cat > docs/ebpfinbound-hardening.md <<'EOF'
+          # Embedded eBPF inbound hardening
+
+          The `pkg/ebpfinbound` runtime is a capture boundary for another userspace policy engine. It does not make DNS, sniffing, routing, or outbound decisions.
+
+          Before mutating the host, the runtime resolves `WANInterfaces: ["auto"]`, validates patterns, rejects zero matches by default, requires explicit lazy binding, acquires an exclusive lock, and refuses to replace a pre-existing `dae0` link or `daens` namespace.
+          EOF
+
+          gofmt -w pkg/ebpfinbound control/ebpf_capture_runtime.go control/ebpf_capture_lock_linux.go control/netns.go
+          go test -tags dae_stub_ebpf ./pkg/ebpfinbound ./control
+          git diff --check
+
+          git add -A
+          git reset --soft "$BASE"
+          git commit -m 'refactor(ebpfinbound): harden embedded capture lifecycle'
+          git push --force origin HEAD:feat/ebpfinbound-hardening
