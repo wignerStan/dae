@@ -60,7 +60,7 @@ jobs:
           path.write_text(text.replace(signature, replacement, 1))
           PY
           cd ebpfinbound
-          go run -mod=mod github.com/cilium/ebpf/cmd/bpf2go@v0.20.0 \
+          GOPACKAGE=ebpfinbound go run -mod=mod github.com/cilium/ebpf/cmd/bpf2go@v0.20.0 \
             -cc clang \
             -no-strip \
             -cflags '-DMAX_MATCH_SET_LEN=1024 -O2 -Wall -Werror' \
