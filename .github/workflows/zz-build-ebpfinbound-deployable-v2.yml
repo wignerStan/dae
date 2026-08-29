@@ -1,0 +1,125 @@
+name: Build deployable eBPF inbound provider
+
+on:
+  push:
+    branches:
+      - tmp/build-ebpfinbound-deployable-v2
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-ebpfinbound-deployable-v2
+  cancel-in-progress: true
+
+jobs:
+  build-test:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: tmp/build-ebpfinbound-deployable-v2
+          fetch-depth: 0
+          submodules: recursive
+      - uses: actions/setup-go@v6
+        with:
+          go-version: 1.26.0
+          cache: false
+      - name: Install eBPF toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang llvm libbpf-dev iproute2
+      - name: Reconstruct standalone module
+        shell: bash
+        run: |
+          set -euxo pipefail
+          cat .github/ebpfinbound-build/source/part-* | base64 -d > /tmp/ebpfinbound-source.tar.gz
+          echo 'fa3d40e6e8b60eb636242dcdbbd39fced5ac3b7cbad7c1382b5a59ec64364180  /tmp/ebpfinbound-source.tar.gz' | sha256sum -c -
+          rm -rf ebpfinbound
+          mkdir -p ebpfinbound
+          tar -xzf /tmp/ebpfinbound-source.tar.gz -C ebpfinbound
+      - name: Generate capture-only BPF bindings
+        shell: bash
+        run: |
+          set -euxo pipefail
+          rm -rf /tmp/ebpfinbound-kern
+          cp -a control/kern /tmp/ebpfinbound-kern
+          python3 - <<'PY'
+          from pathlib import Path
+          path = Path('/tmp/ebpfinbound-kern/tproxy.c')
+          text = path.read_text()
+          old = '\t__u8 has_bpf_get_current_task;\n\t__u16 padding2;'
+          new = '\t__u8 has_bpf_get_current_task;\n\t__u8 external_policy;\n\t__u8 padding2;'
+          if old not in text:
+              raise SystemExit('dae_param ABI marker not found')
+          text = text.replace(old, new, 1)
+          signature = '''static __noinline __s64 route(const __u32 *flag, const void *l4hdr,\n\t\t\t      const __be32 *saddr, const __be32 *daddr,\n\t\t\t      const __be32 *mac)\n{'''
+          replacement = signature + '''\n\t/* Standalone provider delegates every policy decision to its consumer. */\n\tif (unlikely(PARAM.external_policy))\n\t\treturn (__s64)OUTBOUND_CONTROL_PLANE_ROUTING;'''
+          if signature not in text:
+              raise SystemExit('route function marker not found')
+          path.write_text(text.replace(signature, replacement, 1))
+          PY
+          cd ebpfinbound
+          go run -mod=mod github.com/cilium/ebpf/cmd/bpf2go@v0.20.0 \
+            -cc clang \
+            -no-strip \
+            -cflags '-DMAX_MATCH_SET_LEN=1024 -O2 -Wall -Werror' \
+            -tags '!dae_stub_ebpf' \
+            -target 'bpfel,bpfeb' \
+            -type port_range \
+            -type tuples_key \
+            bpf /tmp/ebpfinbound-kern/tproxy.c -- -I/tmp/ebpfinbound-kern/headers
+          python3 - <<'PY'
+          from pathlib import Path
+          for name in ('bpf_bpfel.go', 'bpf_bpfeb.go'):
+              path = Path(name)
+              lines = path.read_text().splitlines()
+              for index, line in enumerate(lines):
+                  if line.startswith('//go:build '):
+                      expr = line.removeprefix('//go:build ')
+                      if not expr.startswith('linux && '):
+                          lines[index] = '//go:build linux && (' + expr + ')'
+                      break
+              else:
+                  raise SystemExit(f'build tag missing from {name}')
+              path.write_text('\n'.join(lines) + '\n')
+          PY
+      - name: Validate standalone provider
+        working-directory: ebpfinbound
+        shell: bash
+        run: |
+          set -euxo pipefail
+          go mod tidy
+          find . -name '*.go' -print0 | xargs -0 gofmt -w
+          go test -race ./...
+          go vet ./...
+          test -z "$(git status --porcelain -- . ':!bpf_bpfel.go' ':!bpf_bpfel.o' ':!bpf_bpfeb.go' ':!bpf_bpfeb.o')"
+          deps=$(go list -deps ./...)
+          if grep -E 'github.com/daeuniverse/dae/(control|config|common|component|cmd|pkg)|github.com/daeuniverse/outbound|github.com/olicesx/quic-go|github.com/quic-go/qpack|github.com/sirupsen/logrus' <<<"$deps"; then
+            echo 'forbidden daemon, policy, outbound, QUIC, or logging dependency leaked into standalone module' >&2
+            exit 1
+          fi
+          go build ./cmd/dae-ebpf-tool
+      - name: Privileged runtime lifecycle
+        working-directory: ebpfinbound
+        shell: bash
+        run: |
+          set -euxo pipefail
+          sudo mkdir -p /sys/fs/bpf /run/netns
+          mountpoint -q /sys/fs/bpf || sudo mount -t bpf bpf /sys/fs/bpf
+          sudo --preserve-env=PATH env HOME="$HOME" go test -tags=integration -run TestPrivilegedRuntimeLifecycle -count=1 -v .
+          ! ip link show daecap0
+          ! ip netns list | grep -q '^dae-ebpfinbound'
+      - name: Package validated module
+        shell: bash
+        run: |
+          set -euxo pipefail
+          tar -czf /tmp/ebpfinbound-final.tar.gz ebpfinbound
+          sha256sum /tmp/ebpfinbound-final.tar.gz > /tmp/ebpfinbound-final.sha256
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ebpfinbound-final
+          path: |
+            /tmp/ebpfinbound-final.tar.gz
+            /tmp/ebpfinbound-final.sha256
+          retention-days: 7
