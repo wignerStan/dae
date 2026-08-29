@@ -1,0 +1,56 @@
+name: Publish readiness and sysctl hardening
+
+on:
+  push:
+    branches:
+      - tmp-hardening-publisher-v2
+
+permissions:
+  contents: write
+
+concurrency:
+  group: publish-ebpfinbound-hardening-v2
+  cancel-in-progress: true
+
+jobs:
+  publish:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: tmp-hardening-publisher-v2
+          fetch-depth: 0
+          submodules: recursive
+      - uses: actions/setup-go@v6
+        with:
+          go-version: 1.26.0
+          cache: false
+      - name: Rebase, validate, and republish one commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          git remote add upstream https://github.com/daeuniverse/dae.git || true
+          git fetch upstream main
+          BASE=$(git rev-parse upstream/main)
+          FEATURE=$(git rev-parse origin/feat/ebpfinbound-hardening)
+
+          git checkout -B hardening "$BASE"
+          git cherry-pick "$FEATURE"
+          python3 .github/publisher/hardening_v2.py
+
+          gofmt -w pkg/ebpfinbound control/ebpf_capture_runtime.go control/ebpf_capture_ready_linux.go control/ebpf_capture_ready_linux_test.go control/sysctl.go control/sysctl_restore_test.go
+          go test -tags dae_stub_ebpf ./pkg/ebpfinbound ./control
+          go test -tags dae_stub_ebpf ./...
+          go vet -tags dae_stub_ebpf ./pkg/ebpfinbound ./control
+          git diff --check
+
+          git config user.name Jacob
+          git config user.email 240170694+wignerStan@users.noreply.github.com
+          git add -A
+          git reset --soft "$BASE"
+          git commit -m 'refactor(ebpfinbound): harden capture lifecycle and readiness'
+
+          # Keep the fork base and feature branch on the same latest upstream line.
+          git push --force origin "$BASE":refs/heads/main
+          git push --force origin HEAD:refs/heads/feat/ebpfinbound-hardening
