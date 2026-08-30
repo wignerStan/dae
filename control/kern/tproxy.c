@@ -2373,6 +2373,14 @@ static __always_inline bool pid_is_control_plane(struct __sk_buff *skb,
 	struct pid_pname *pid_pname;
 	__u64 cookie = bpf_get_socket_cookie(skb);
 
+	/* A marked outbound socket is already protected from capture. Check the
+	 * mark before consulting cookie_pid_map: sing-box sockets are tracked in
+	 * that map, but they are not dae's control-plane PID. */
+	if (PARAM.dae_socket_mark && skb->mark == PARAM.dae_socket_mark)
+		return true;
+	if ((skb->mark & 0x100) == 0x100)
+		return true;
+
 	pid_pname = bpf_map_lookup_elem(&cookie_pid_map, &cookie);
 	if (pid_pname) {
 		pid_pname->last_seen_ns = bpf_ktime_get_ns();
@@ -2392,10 +2400,6 @@ static __always_inline bool pid_is_control_plane(struct __sk_buff *skb,
 	}
 	if (p)
 		*p = NULL;
-	if (PARAM.dae_socket_mark && skb->mark == PARAM.dae_socket_mark)
-		return true;
-	if ((skb->mark & 0x100) == 0x100)
-		return true;
 	return false;
 }
 
@@ -2466,6 +2470,12 @@ static __noinline bool
 wan_outbound_is_alive(struct __sk_buff *skb, __u8 outbound, __u8 l4proto,
 		      __be16 dport)
 {
+	/* External policy mode has no dae-owned outbound health map. The reserved
+	 * control-plane result is intentionally handed to sing-box, so it must not
+	 * be rejected as an unprobed outbound here. */
+	if (PARAM.external_policy && outbound == OUTBOUND_CONTROL_PLANE_ROUTING)
+		return true;
+
 	/* DNS must always reach control plane; userspace handles fallback. */
 	if (dport == bpf_htons(53))
 		return true;
