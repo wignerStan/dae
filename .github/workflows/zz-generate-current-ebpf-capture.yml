@@ -1,0 +1,71 @@
+name: Generate current capture eBPF assets
+
+on:
+  push:
+    branches:
+      - tmp/generate-current-ebpf-capture-20260830
+
+permissions:
+  contents: read
+
+jobs:
+  generate:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: tmp/generate-current-ebpf-capture-20260830
+          submodules: recursive
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: Add capture-only ABI field
+        shell: python
+        run: |
+          from pathlib import Path
+          path = Path('control/kern/tproxy.c')
+          text = path.read_text()
+          text = text.replace(
+              '\t__u8 has_bpf_get_current_task;\n\t__u16 padding2;',
+              '\t__u8 has_bpf_get_current_task;\n\t__u8 external_policy;\n\t__u8 padding2;',
+              1,
+          )
+          signature = '''static __noinline __s64 route(const __u32 *flag, const void *l4hdr,
+                                      const __be32 *saddr, const __be32 *daddr,
+                                      const __be32 *mac)
+          {
+          '''
+          if signature not in text:
+              raise SystemExit('route signature not found')
+          text = text.replace(
+              signature,
+              signature + '''\tif (unlikely(PARAM.external_policy))
+          \t\treturn (__s64)OUTBOUND_CONTROL_PLANE_ROUTING;
+          
+          ''',
+              1,
+          )
+          path.write_text(text)
+      - name: Generate BPF bindings
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y clang llvm
+          make ebpf
+          test -s control/bpf_bpfel.go
+          test -s control/bpf_bpfeb.go
+          test -s control/bpf_bpfel.o
+          test -s control/bpf_bpfeb.o
+          sha256sum control/bpf_bpfel.go control/bpf_bpfeb.go control/bpf_bpfel.o control/bpf_bpfeb.o > /tmp/SHA256SUMS
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dae-current-capture-ebpf
+          path: |
+            control/bpf_bpfel.go
+            control/bpf_bpfeb.go
+            control/bpf_bpfel.o
+            control/bpf_bpfeb.o
+            /tmp/SHA256SUMS
+          retention-days: 2
