@@ -26,26 +26,16 @@ jobs:
           from pathlib import Path
           path = Path('control/kern/tproxy.c')
           text = path.read_text()
-          text = text.replace(
-              '\t__u8 has_bpf_get_current_task;\n\t__u16 padding2;',
-              '\t__u8 has_bpf_get_current_task;\n\t__u8 external_policy;\n\t__u8 padding2;',
-              1,
-          )
-          signature = '''static __noinline __s64 route(const __u32 *flag, const void *l4hdr,
-                                      const __be32 *saddr, const __be32 *daddr,
-                                      const __be32 *mac)
-          {
-          '''
-          if signature not in text:
-              raise SystemExit('route signature not found')
-          text = text.replace(
-              signature,
-              signature + '''\tif (unlikely(PARAM.external_policy))
-          \t\treturn (__s64)OUTBOUND_CONTROL_PLANE_ROUTING;
-          
-          ''',
-              1,
-          )
+          old = '\t__u8 has_bpf_get_current_task;\n\t__u16 padding2;'
+          new = '\t__u8 has_bpf_get_current_task;\n\t__u8 external_policy;\n\t__u8 padding2;'
+          if old not in text:
+              raise SystemExit('parameter layout not found')
+          text = text.replace(old, new, 1)
+          marker = '{\n#define _l4proto_type flag[0]'
+          replacement = '{\n\tif (unlikely(PARAM.external_policy))\n\t\treturn (__s64)OUTBOUND_CONTROL_PLANE_ROUTING;\n\n#define _l4proto_type flag[0]'
+          if marker not in text:
+              raise SystemExit('route body marker not found')
+          text = text.replace(marker, replacement, 1)
           path.write_text(text)
       - name: Generate BPF bindings
         shell: bash
