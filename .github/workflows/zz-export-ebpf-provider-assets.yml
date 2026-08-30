@@ -1,0 +1,36 @@
+name: Export eBPF provider assets
+
+on:
+  push:
+    branches:
+      - tmp/export-ebpf-provider-assets-20260830
+
+permissions:
+  contents: read
+
+jobs:
+  export:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: tmp/export-ebpf-provider-assets-20260830
+      - name: Validate tracked assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -s control/bpf_bpfel.go
+          test -s control/bpf_bpfeb.go
+          test -s control/bpf_bpfel.o
+          test -s control/bpf_bpfeb.o
+          sha256sum control/bpf_bpfel.go control/bpf_bpfeb.go control/bpf_bpfel.o control/bpf_bpfeb.o > /tmp/SHA256SUMS
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dae-ebpf-provider-assets
+          path: |
+            control/bpf_bpfel.go
+            control/bpf_bpfeb.go
+            control/bpf_bpfel.o
+            control/bpf_bpfeb.o
+            /tmp/SHA256SUMS
+          retention-days: 2
