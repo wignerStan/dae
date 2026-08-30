@@ -1,0 +1,51 @@
+name: Generate ebpfinbound assets
+
+on:
+  push:
+    branches:
+      - tmp/generate-ebpfinbound-assets-20260830
+
+permissions:
+  contents: read
+
+jobs:
+  generate:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          submodules: recursive
+      - uses: actions/setup-go@v6
+        with:
+          go-version: 1.26.7
+          cache: false
+      - name: Enable capture-only route mode
+        shell: python
+        run: |
+          from pathlib import Path
+          p = Path('control/kern/tproxy.c')
+          s = p.read_text()
+          s = s.replace(
+              '\t__u8 use_redirect_peer;\n\t__u8 has_bpf_get_current_task;\n\t__u8 padding2[2];\n\t__u32 dae_socket_mark;\n',
+              '\t__u8 use_redirect_peer;\n\t__u8 has_bpf_get_current_task;\n\t__u8 external_policy;\n\t__u8 padding2;\n\t__u32 dae_socket_mark;\n',
+          )
+          needle = '''static __always_inline int route(struct __sk_buff *skb,\n                                 struct parsed_packet *p,\n                                 struct routing_result *result) {\n\tif (param->use_redirect_peer) {\n'''
+          replacement = '''static __always_inline int route(struct __sk_buff *skb,\n                                 struct parsed_packet *p,\n                                 struct routing_result *result) {\n\tif (param->external_policy) {\n\t\tresult->outbound = OUTBOUND_CONTROL_PLANE_ROUTING;\n\t\tresult->mark = 0;\n\t\tresult->must = 0;\n\t\treturn TC_ACT_REDIRECT;\n\t}\n\tif (param->use_redirect_peer) {\n'''
+          if needle not in s:
+              raise SystemExit('route hook not found')
+          p.write_text(s.replace(needle, replacement))
+      - name: Generate BPF bindings and objects
+        run: make ebpf
+      - name: Prepare standalone package assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/ebpfinbound-assets
+          cp control/bpf_bpfel.go control/bpf_bpfeb.go control/bpf_bpfel.o control/bpf_bpfeb.o /tmp/ebpfinbound-assets/
+          sed -i 's/^package control$/package ebpfinbound/' /tmp/ebpfinbound-assets/bpf_bpfel.go /tmp/ebpfinbound-assets/bpf_bpfeb.go
+          sha256sum /tmp/ebpfinbound-assets/* > /tmp/ebpfinbound-assets/SHA256SUMS
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ebpfinbound-assets
+          path: /tmp/ebpfinbound-assets
+          retention-days: 7
