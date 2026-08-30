@@ -1,0 +1,57 @@
+name: Publish eBPF inbound review hardening
+
+on:
+  push:
+    branches:
+      - tmp/validate-ebpfinbound-review-hardening
+    paths:
+      - '.github/ebpfinbound-hardening/patch.gz.b64'
+      - '.github/workflows/zz-publish-ebpfinbound-review-hardening.yml'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: publish-ebpfinbound-review-hardening
+  cancel-in-progress: true
+
+jobs:
+  publish:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: tmp/validate-ebpfinbound-review-hardening
+          fetch-depth: 0
+          submodules: recursive
+      - uses: actions/setup-go@v6
+        with:
+          go-version: 1.26.0
+          cache: false
+      - name: Apply, generate, validate, and publish
+        shell: bash
+        run: |
+          set -euo pipefail
+          base=5db27a0028d36e7847bd3796497df952337a20e2
+          target=fix/ebpfinbound-review-hardening
+          base64 -d .github/ebpfinbound-hardening/patch.gz.b64 | gzip -d > /tmp/hardening.patch
+          echo '2a08035d4dac22d07c3900d266ff28e13cd3f8622e07187b7f2cab8580ac2cb9  /tmp/hardening.patch' | sha256sum -c -
+
+          git reset --hard "$base"
+          git clean -ffd
+          git apply --index /tmp/hardening.patch
+          make ebpf
+          git add -f control/bpf_bpfel.go control/bpf_bpfel.o control/bpf_bpfeb.go control/bpf_bpfeb.o
+          find pkg/ebpfinbound control -name '*.go' -print0 | xargs -0 gofmt -w
+          git add pkg/ebpfinbound control cmd/dae-ebpf-audit/main.go
+          git diff --cached --check
+
+          go test ./pkg/ebpfinbound/... ./control/...
+          go test -tags dae_stub_ebpf ./...
+          go vet -tags dae_stub_ebpf ./pkg/ebpfinbound/... ./control/...
+
+          git config user.name Jacob
+          git config user.email 240170694+wignerStan@users.noreply.github.com
+          git commit -m 'refactor(ebpfinbound): harden stable capture runtime'
+          git push --force origin HEAD:"$target"
