@@ -29,22 +29,21 @@ jobs:
           from pathlib import Path
           p = Path('control/kern/tproxy.c')
           s = p.read_text()
-          old = '\t__u8 use_redirect_peer;\n\t__u8 has_bpf_get_current_task;\n\t__u8 padding2[2];\n\t__u32 dae_socket_mark;\n'
-          new = '\t__u8 use_redirect_peer;\n\t__u8 has_bpf_get_current_task;\n\t__u8 external_policy;\n\t__u8 padding2;\n\t__u32 dae_socket_mark;\n'
+          old = '\t__u8 has_bpf_get_current_task;\n\t__u16 padding2;\n'
+          new = '\t__u8 has_bpf_get_current_task;\n\t__u8 external_policy;\n\t__u8 padding2;\n'
           if old not in s:
               raise SystemExit('dae_param layout not found')
           s = s.replace(old, new, 1)
-          old_route = '\tif (param->use_redirect_peer) {'
-          new_route = '''\tif (param->external_policy) {
-          \t\tresult->outbound = OUTBOUND_CONTROL_PLANE_ROUTING;
-          \t\tresult->mark = 0;
-          \t\tresult->must = 0;
-          \t\treturn TC_ACT_REDIRECT;
-          \t}
-          \tif (param->use_redirect_peer) {'''
-          if old_route not in s:
-              raise SystemExit('route entry not found')
-          p.write_text(s.replace(old_route, new_route, 1))
+          marker = '#define _dscp flag[6]\n'
+          insertion = '''#define _dscp flag[6]
+
+\tif (PARAM.external_policy)
+\t\treturn (__s64)OUTBOUND_CONTROL_PLANE_ROUTING;
+'''
+          if marker not in s:
+              raise SystemExit('route macro marker not found')
+          s = s.replace(marker, insertion, 1)
+          p.write_text(s)
           PY
           make ebpf
           mkdir -p /tmp/generated
