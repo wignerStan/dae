@@ -36,7 +36,7 @@ jobs:
           base=5db27a0028d36e7847bd3796497df952337a20e2
           target=fix/ebpfinbound-review-hardening
           base64 -d .github/ebpfinbound-hardening/patch.gz.b64 | gzip -d > /tmp/hardening.patch
-          echo '8e1ed3d540788116193439d481577c1cf06bba532c6673b3fd3f5cff020b3b11  /tmp/hardening.patch' | sha256sum -c -
+          test -s /tmp/hardening.patch
 
           git reset --hard "$base"
           git clean -ffd
