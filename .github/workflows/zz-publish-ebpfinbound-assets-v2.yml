@@ -1,0 +1,66 @@
+name: Publish ebpfinbound generated assets v2
+
+on:
+  push:
+    branches:
+      - tmp/generate-ebpfinbound-assets-20260830
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          submodules: recursive
+          fetch-depth: 0
+      - uses: actions/setup-go@v6
+        with:
+          go-version: 1.26.7
+          cache: false
+      - name: Generate capture-only BPF objects
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('control/kern/tproxy.c')
+          s = p.read_text()
+          old = '\t__u8 use_redirect_peer;\n\t__u8 has_bpf_get_current_task;\n\t__u8 padding2[2];\n\t__u32 dae_socket_mark;\n'
+          new = '\t__u8 use_redirect_peer;\n\t__u8 has_bpf_get_current_task;\n\t__u8 external_policy;\n\t__u8 padding2;\n\t__u32 dae_socket_mark;\n'
+          if old not in s:
+              raise SystemExit('dae_param layout not found')
+          s = s.replace(old, new, 1)
+          old_route = '\tif (param->use_redirect_peer) {'
+          new_route = '''\tif (param->external_policy) {
+          \t\tresult->outbound = OUTBOUND_CONTROL_PLANE_ROUTING;
+          \t\tresult->mark = 0;
+          \t\tresult->must = 0;
+          \t\treturn TC_ACT_REDIRECT;
+          \t}
+          \tif (param->use_redirect_peer) {'''
+          if old_route not in s:
+              raise SystemExit('route entry not found')
+          p.write_text(s.replace(old_route, new_route, 1))
+          PY
+          make ebpf
+          mkdir -p /tmp/generated
+          cp control/bpf_bpfel.go control/bpf_bpfeb.go control/bpf_bpfel.o control/bpf_bpfeb.o /tmp/generated/
+          sed -i 's/^package control$/package ebpfinbound/' /tmp/generated/bpf_bpfel.go /tmp/generated/bpf_bpfeb.go
+          sha256sum /tmp/generated/* > /tmp/generated/SHA256SUMS
+      - name: Publish generated asset branch
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git checkout -B tmp/generated-ebpfinbound-assets-20260830 5db27a0028d36e7847bd3796497df952337a20e2
+          rm -rf generated-ebpfinbound-assets
+          mkdir generated-ebpfinbound-assets
+          cp /tmp/generated/* generated-ebpfinbound-assets/
+          git add -f generated-ebpfinbound-assets
+          git commit -m 'chore(ebpf): generate standalone inbound assets'
+          git push --force origin HEAD:tmp/generated-ebpfinbound-assets-20260830
