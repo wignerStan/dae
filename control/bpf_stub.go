@@ -21,25 +21,6 @@ import (
 
 var errBpfObjectsUnavailable = errors.New("eBPF objects are unavailable in this build; this is a stub build (tag dae_stub_ebpf); run make ebpf before building")
 
-// bpfDaeParam corresponds to C struct dae_param in tproxy.c
-// use_redirect_peer enables bpf_redirect_peer() optimization for TC ingress.
-// Only safe with: (1) netkit device + scrub=NONE, (2) kernel >= 6.8 (CVE-2025-37959 fix).
-// When enabled, provides ~50% throughput improvement by bypassing CPU backlog.
-type bpfDaeParam struct {
-	_                    structs.HostLayout
-	TproxyPort           uint32
-	ControlPlanePid      uint32
-	Dae0Ifindex          uint32
-	DaeNetnsId           uint32
-	Dae0peerMac          [6]uint8
-	PaddingAfterMac      [2]uint8
-	UseRedirectPeer      uint8 // 0=use bpf_redirect(), 1=use bpf_redirect_peer() when safe
-	HasBpfGetCurrentTask uint8
-	ExternalPolicy       uint8 // 1=send all captured flows to the external userspace policy engine
-	Padding2             uint8
-	DaeSocketMark        uint32 // mark set on dae's own sockets to identify them in eBPF
-}
-
 type bpfDomainRouting struct {
 	_      structs.HostLayout
 	Bitmap [32]uint32

@@ -1172,7 +1172,18 @@ func newControlPlaneWithMode(ctx context.Context, log *logrus.Logger, bpf any, d
 
 	// Resolve subscriptions to nodes.
 	resolvingfailed := false
-	if !conf.Global.DisableWaitingNetwork {
+	// A prepared external-policy generation can be built while the current dae
+	// datapath is deliberately fail-closed after its sing-box session exits.
+	// With no dae-owned subscriptions there is nothing for this startup probe to
+	// protect, and probing through the retired external session can only consume
+	// the entire reload deadline. Keep the probe when dae subscriptions exist.
+	waitForNetwork := shouldWaitForNetwork(
+		conf.Global.DisableWaitingNetwork,
+		prepareOnly,
+		len(conf.Subscription),
+		control.ExternalPolicyConfigured(),
+	)
+	if waitForNetwork {
 		epo := 5 * time.Second
 		client := http.Client{
 			Transport: &http.Transport{
@@ -1355,6 +1366,13 @@ func newControlPlaneWithMode(ctx context.Context, log *logrus.Logger, bpf any, d
 	log.Infof("Total startup time: %v", time.Since(startTime))
 
 	return c, nil
+}
+
+func shouldWaitForNetwork(disabled, prepareOnly bool, subscriptionCount int, externalPolicy bool) bool {
+	if disabled {
+		return false
+	}
+	return !(prepareOnly && externalPolicy && subscriptionCount == 0)
 }
 
 func newHTTPClientForDialer(d netproxy.Dialer, timeout time.Duration, soMark uint32, mptcp bool) http.Client {

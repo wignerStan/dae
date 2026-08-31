@@ -537,30 +537,18 @@ retryLoadBpf:
 	}
 
 	constants := map[string]interface{}{
-		"PARAM": struct {
-			tproxyPort           uint32
-			controlPlanePid      uint32
-			dae0Ifindex          uint32
-			daeNetnsId           uint32
-			dae0peerMac          [6]byte
-			paddingAfterMac      [2]uint8
-			useRedirectPeer      uint8
-			hasBpfGetCurrentTask uint8
-			externalPolicy       uint8
-			padding2             uint8
-			daeSocketMark        uint32
-		}{
-			tproxyPort:           opts.BigEndianTproxyPort,
-			controlPlanePid:      uint32(os.Getpid()),
-			dae0Ifindex:          uint32(GetDaeNetns().Dae0().Attrs().Index),
-			daeNetnsId:           uint32(netnsID),
-			dae0peerMac:          peerMac,
-			paddingAfterMac:      [2]uint8{0, 0},
-			useRedirectPeer:      useRedirectPeer,
-			hasBpfGetCurrentTask: hasBpfGetCurrentTask,
-			externalPolicy:       externalPolicy,
-			padding2:             0,
-			daeSocketMark:        soMarkFromDae,
+		"PARAM": bpfDaeParam{
+			TproxyPort:           opts.BigEndianTproxyPort,
+			ControlPlanePid:      uint32(os.Getpid()),
+			Dae0Ifindex:          uint32(GetDaeNetns().Dae0().Attrs().Index),
+			DaeNetnsId:           uint32(netnsID),
+			Dae0peerMac:          peerMac,
+			PaddingAfterMac:      [2]uint8{0, 0},
+			UseRedirectPeer:      useRedirectPeer,
+			HasBpfGetCurrentTask: hasBpfGetCurrentTask,
+			ExternalPolicy:       externalPolicy,
+			Padding2:             0,
+			DaeSocketMark:        soMarkFromDae,
 		},
 	}
 	if err = loadBpfObjectsWithConstantsAndCustomizer(

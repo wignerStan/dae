@@ -94,6 +94,27 @@ dae 身份并接收三个监听套接字后，会确认该数据面代次，此�
 dae 热重载时，新控制面代次会交接一组新的监听器。sing-box 只替换监听器，
 已建立的 TCP 路由和 UDP NAT 会话仍由 sing-box 持有。
 
+重启 sing-box 与 dae 热重载不同：旧控制通道会被回收，dae 不会自动重新连接新的
+sing-box 进程。必须先启动 sing-box，再 reload（或重启）dae，以便传递新一代监听器。
+这是故意的失败关闭行为，避免流量悄悄回到 dae 的旧用户态路由器。
+
+当 dae 本身没有 subscription 时，恢复用的分阶段 reload 会跳过公共 HTTP 网络就绪
+探测。旧 external-policy 会话已经按设计失败关闭，无法承载该探测；继续等待只会让
+交接卡到 reload 超时。若配置仍含 dae subscription，则会保留就绪探测；只有在其
+bootstrap 路径已由其他机制保证时，才应显式设置 `disable_waiting_network`。
+
+## 合约测试
+
+请在隔离且具备特权的 Linux 测试 VM 中运行：
+
+```shell
+make sing-box-datapath-test
+```
+
+该目标覆盖 Unix `SOCK_SEQPACKET` 信封/描述符、external-policy 会话以及生成的
+eBPF 回归探针，需要 `CAP_BPF`、`CAP_NET_ADMIN` 和匹配的内核 BTF；不要在生产
+数据面主机上运行。`dae_stub_ebpf` 仅用于编译期 CI 覆盖，不能替代 VM 测试。
+
 ## 元数据
 
 对于每个新 TCP 连接或 UDP 会话，sing-box 会按原始源/目标五元组查询元数据。

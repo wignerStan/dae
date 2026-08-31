@@ -12,6 +12,7 @@ CFLAGS := -O2 -Wall -Werror $(CFLAGS)
 TARGET ?= bpfel,bpfeb
 OUTPUT ?= dae
 MAX_MATCH_SET_LEN ?= 1024
+BPF_TEST_RUN ?= .
 CFLAGS := -DMAX_MATCH_SET_LEN=$(MAX_MATCH_SET_LEN) $(CFLAGS)
 DEFAULT_GOEXPERIMENT := heapminimum512kib,randomizedheapbase64
 GOEXPERIMENT_MERGED := $(shell printf '%s\n' "$(DEFAULT_GOEXPERIMENT),$(GOEXPERIMENT)" | tr ',' '\n' | sed '/^$$/d' | awk '!seen[$$0]++' | paste -sd, -)
@@ -44,7 +45,7 @@ endif
 
 BUILD_ARGS := -trimpath -ldflags "-s -w -X github.com/daeuniverse/dae/cmd.Version=$(VERSION) -X github.com/daeuniverse/dae/common/consts.MaxMatchSetLen_=$(MAX_MATCH_SET_LEN)" $(BUILD_ARGS)
 
-.PHONY: clean-ebpf ebpf ebpf-sync ebpf-sync-check ebpf-test-tagged ebpf-test-debug ebpf-test-debug-tagged ebpf-audit dae submodule submodules
+.PHONY: clean-ebpf ebpf ebpf-sync ebpf-sync-check ebpf-test-tagged ebpf-test-debug ebpf-test-debug-tagged ebpf-audit dae sing-box-datapath-test submodule submodules
 
 ## Begin Dae Build
 dae: export GOOS=linux
@@ -55,6 +56,17 @@ dae: ebpf
 	@echo $(CFLAGS)
 	go build -tags=$(shell cat $(BUILD_TAGS_FILE)) -o $(OUTPUT) $(BUILD_ARGS) .
 ## End Dae Build
+
+## External sing-box datapath contract
+# Run this target on a privileged Linux test host (or VM). It deliberately
+# uses the real eBPF objects; the dae_stub_ebpf tag is only for the portable
+# compile-only unit-test job.
+sing-box-datapath-test: ebpf
+	go test -race ./common/daeipc
+	go test -race ./control -run 'Test(OpenExternalPolicySession|DialExternalPolicy|ServeExternalPolicySession|ExternalPolicyLookup|ExternalPolicyListener|ExternalPolicyProcess|ExternalPolicyMAC|ConfiguredExternalPolicy|ExternalPolicyConfigured|BpfDaeParam)'
+	go test -race ./cmd -run '^TestShouldWaitForNetwork$$'
+	$(MAKE) ebpf-test
+## End External sing-box datapath contract
 
 ## Begin Git Submodules
 .gitmodules.d.mk: .gitmodules
@@ -133,7 +145,7 @@ ebpf-test: ebpf-sync submodule clean-ebpf
     go generate ./control/bpf_bug_verification_test.go && \
     go generate ./control/kern/tests/bpf_test.go && \
     go clean -testcache && \
-    go test -v -tags dae_bpf_tests ./control/kern/tests/...
+    go test -v -tags dae_bpf_tests ./control/kern/tests/... -run '$(BPF_TEST_RUN)'
 
 ebpf-test-tagged: export BPF_CLANG := $(CLANG)
 ebpf-test-tagged: export BPF_STRIP_FLAG := $(STRIP_FLAG)

@@ -1685,3 +1685,58 @@ int testcheck_not_mismtach(struct __sk_buff *skb)
 				      IPV4(192,168,0,1), IPV4(1,1,1,1),
 				      19233, 79);
 }
+
+/*
+ * External-policy regression probes.
+ *
+ * These intentionally call the small guards that sit on the WAN egress fast
+ * path instead of relying on a full network namespace.  The Go harness loads
+ * PARAM with the requested mode/mark and executes the three-stage programs
+ * through bpf_prog_test_run().  Keep these probes side-effect free so they can
+ * run on every kernel used by the BPF CI job.
+ */
+
+SEC("tc/pktgen/bug_external_policy_mark_precedence")
+int testpktgen_bug_external_policy_mark_precedence(struct __sk_buff *skb)
+{
+	/* The mark is deliberately non-zero; old code consulted cookie_pid_map
+	 * first and therefore misclassified a sing-box socket as non-control-plane.
+	 */
+	skb->mark = PARAM.dae_socket_mark;
+	return TC_ACT_OK;
+}
+
+SEC("tc/setup/bug_external_policy_mark_precedence")
+int testsetup_bug_external_policy_mark_precedence(struct __sk_buff *skb)
+{
+	(void)skb;
+	return TC_ACT_OK;
+}
+
+SEC("tc/check/bug_external_policy_mark_precedence")
+int testcheck_bug_external_policy_mark_precedence(struct __sk_buff *skb)
+{
+	return pid_is_control_plane(skb, NULL) ? TC_ACT_OK : TC_ACT_SHOT;
+}
+
+SEC("tc/pktgen/bug_external_policy_reserved_outbound")
+int testpktgen_bug_external_policy_reserved_outbound(struct __sk_buff *skb)
+{
+	(void)skb;
+	return TC_ACT_OK;
+}
+
+SEC("tc/setup/bug_external_policy_reserved_outbound")
+int testsetup_bug_external_policy_reserved_outbound(struct __sk_buff *skb)
+{
+	(void)skb;
+	return TC_ACT_OK;
+}
+
+SEC("tc/check/bug_external_policy_reserved_outbound")
+int testcheck_bug_external_policy_reserved_outbound(struct __sk_buff *skb)
+{
+	return wan_outbound_is_alive(skb, OUTBOUND_CONTROL_PLANE_ROUTING,
+				     IPPROTO_TCP, bpf_htons(443)) ?
+					TC_ACT_OK : TC_ACT_SHOT;
+}

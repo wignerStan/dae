@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"reflect"
 	"strings"
+	"structs"
 	"syscall"
 	"testing"
 
@@ -29,6 +30,12 @@ type programSet struct {
 	check  *ebpf.Program
 }
 
+func isExternalPolicyProbe(id string) bool {
+	id = strings.ToLower(id)
+	return strings.HasPrefix(id, "bugexternalpolicymarkprecedence") ||
+		strings.HasPrefix(id, "bugexternalpolicyreservedoutbound")
+}
+
 const maxMatchSetLen = 32 * 32
 
 // testMaxMatchSetLen is the number of routing_map slots the routing engine
@@ -40,6 +47,24 @@ const maxMatchSetLen = 32 * 32
 // must=false (e.g. IpsetMatch), the engine never exits the loop early and the
 // 1022 extra domain lookups cause the test to run for multiple minutes.
 const testMaxMatchSetLen = 5
+
+// bpfTestParam mirrors struct dae_param in control/kern/tproxy.c. Keep the
+// test loader on the same ABI as the production loader so mode-dependent
+// branches (especially external policy) are exercised with real constants.
+type bpfTestParam struct {
+	_                    structs.HostLayout
+	TproxyPort           uint32
+	ControlPlanePid      uint32
+	Dae0Ifindex          uint32
+	DaeNetnsId           uint32
+	Dae0peerMac          [6]uint8
+	PaddingAfterMac      [2]uint8
+	UseRedirectPeer      uint8
+	HasBpfGetCurrentTask uint8
+	ExternalPolicy       uint8
+	Padding2             uint8
+	DaeSocketMark        uint32
+}
 
 func runBpfProgram(prog *ebpf.Program, data, ctx []byte) (statusCode uint32, dataOut, ctxOut []byte, err error) {
 	dataOut = make([]byte, len(data))
@@ -60,6 +85,10 @@ func runBpfProgram(prog *ebpf.Program, data, ctx []byte) (statusCode uint32, dat
 }
 
 func collectPrograms(t *testing.T) (obj *bpftestObjects, progset []programSet, err error) {
+	return collectProgramsWithParam(t, nil)
+}
+
+func collectProgramsWithParam(t *testing.T, param *bpfTestParam) (obj *bpftestObjects, progset []programSet, err error) {
 	obj = &bpftestObjects{}
 	spec, err := loadBpftest()
 	if err != nil {
@@ -67,6 +96,15 @@ func collectPrograms(t *testing.T) (obj *bpftestObjects, progset []programSet, e
 	}
 	if err = disableAllPinnedMapsForTests(spec); err != nil {
 		return nil, nil, err
+	}
+	if param != nil {
+		variable, ok := spec.Variables["PARAM"]
+		if !ok || variable == nil {
+			return nil, nil, fmt.Errorf("missing PARAM BPF constant")
+		}
+		if err = variable.Set(*param); err != nil {
+			return nil, nil, fmt.Errorf("rewrite PARAM BPF constant: %w", err)
+		}
 	}
 
 	if err = spec.LoadAndAssign(obj,
@@ -244,6 +282,13 @@ func TestBpfBugsVerification(t *testing.T) {
 	bugResults := make(map[string]bool)
 
 	for _, progset := range progsets {
+		// These probes have mode-specific PARAM constants and are exercised by
+		// TestExternalPolicyBpfGuards. The legacy generic harness assumes every
+		// check program returns TC_ACT_OK and cannot represent their negative
+		// health-map case.
+		if isExternalPolicyProbe(progset.id) {
+			continue
+		}
 		// Only run bug verification tests
 		if !strings.HasPrefix(strings.ToLower(progset.id), "bug_") &&
 			!strings.HasPrefix(strings.ToLower(progset.id), "bugcombined") {
@@ -360,6 +405,9 @@ func Test(t *testing.T) {
 	var zeroEntry []byte
 
 	for _, progset := range progsets {
+		if isExternalPolicyProbe(progset.id) {
+			continue
+		}
 		if err = obj.RoutingMetaMap.Update(key, activeRulesLen, ebpf.UpdateAny); err != nil {
 			t.Fatalf("failed to initialize routing_meta_map: %v", err)
 		}

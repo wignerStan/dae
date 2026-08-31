@@ -109,6 +109,17 @@ func TestConfiguredExternalPolicyUID(t *testing.T) {
 	}
 }
 
+func TestExternalPolicyConfigured(t *testing.T) {
+	t.Setenv(externalPolicySocketEnv, "")
+	if ExternalPolicyConfigured() {
+		t.Fatal("empty external policy socket enabled the mode")
+	}
+	t.Setenv(externalPolicySocketEnv, "  /run/dae/sing-box.sock  ")
+	if !ExternalPolicyConfigured() {
+		t.Fatal("configured external policy socket did not enable the mode")
+	}
+}
+
 func TestExternalPolicyLookupRejectsGenerationMismatch(t *testing.T) {
 	request := daeipc.NewMessage(daeipc.TypeLookup)
 	request.RequestID = 1

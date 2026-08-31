@@ -177,6 +177,17 @@ struct dae_param {
 	__u32 dae_socket_mark;
 };
 
+/* Keep the userspace bpf2go constant mirror byte-for-byte compatible with the
+ * kernel object.  The explicit assertions make an accidental padding or field
+ * reorder fail at eBPF generation time instead of silently changing routing.
+ */
+_Static_assert(sizeof(struct dae_param) == 32,
+	       "struct dae_param ABI size changed");
+_Static_assert(__builtin_offsetof(struct dae_param, external_policy) == 26,
+	       "struct dae_param external_policy offset changed");
+_Static_assert(__builtin_offsetof(struct dae_param, dae_socket_mark) == 28,
+	       "struct dae_param dae_socket_mark offset changed");
+
 /* Use const volatile for cilium/ebpf v0.20.0 compatibility.
  * This ensures the variable is placed in .rodata section and
  * can be rewritten from userspace via RewriteConstants. */

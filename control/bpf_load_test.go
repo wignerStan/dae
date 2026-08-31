@@ -33,20 +33,7 @@ func testLoadMainBPFObjects(t *testing.T, daeSocketMark uint32) {
 	}
 
 	constants := map[string]interface{}{
-		"PARAM": struct {
-			tproxyPort      uint32
-			controlPlanePid uint32
-			dae0Ifindex     uint32
-			daeNetnsId      uint32
-			dae0peerMac     [6]byte
-			paddingAfterMac [2]uint8
-			useRedirectPeer uint8
-			padding1        uint8
-			padding2        uint16
-			daeSocketMark   uint32
-		}{
-			daeSocketMark: daeSocketMark,
-		},
+		"PARAM": bpfDaeParam{DaeSocketMark: daeSocketMark},
 	}
 
 	if err := loadBpfObjectsWithConstantsAndCustomizer(&obj, opts, constants, disableAllPinnedMapsForTests); err != nil {

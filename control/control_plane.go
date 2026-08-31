@@ -380,7 +380,7 @@ func newControlPlaneWithContextOptions(
 		}
 	}
 
-	externalPolicySocket := strings.TrimSpace(os.Getenv(externalPolicySocketEnv))
+	externalPolicySocket := configuredExternalPolicySocket()
 	var externalPolicyUID uint32
 	if externalPolicySocket != "" {
 		externalPolicyUID, err = configuredExternalPolicyUID()

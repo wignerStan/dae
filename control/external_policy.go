@@ -44,6 +44,17 @@ type externalPolicySession struct {
 	generation uint64
 }
 
+// ExternalPolicyConfigured reports whether this process is configured to hand
+// the datapath to an external policy engine. Keep environment parsing here so
+// startup and reload code cannot drift from control-plane activation rules.
+func ExternalPolicyConfigured() bool {
+	return configuredExternalPolicySocket() != ""
+}
+
+func configuredExternalPolicySocket() string {
+	return strings.TrimSpace(os.Getenv(externalPolicySocketEnv))
+}
+
 func (c *ControlPlane) openExternalPolicySession(listener *Listener) (*externalPolicySession, error) {
 	if c == nil || c.externalPolicySocket == "" {
 		return nil, fmt.Errorf("external policy socket is not configured")
@@ -228,7 +239,7 @@ func closeExternalPolicyFiles(files []*os.File) {
 }
 
 func (c *ControlPlane) serveExternalPolicySession(session *externalPolicySession) error {
-	if c == nil || session == nil || session.conn == nil {
+	if c == nil || c.ctx == nil || session == nil || session.conn == nil {
 		return fmt.Errorf("invalid external policy session")
 	}
 
@@ -311,10 +322,18 @@ func (c *ControlPlane) externalPolicyLookupResponse(request daeipc.Message, gene
 	}
 	source = common.ConvergeAddrPort(source)
 	destination = common.ConvergeAddrPort(destination)
+	if c == nil || c.core == nil {
+		response.Error = "external policy control plane is unavailable"
+		return response
+	}
+	lookupContext := c.ctx
+	if lookupContext == nil {
+		lookupContext = context.Background()
+	}
 
 	var routingResult *bpfRoutingResult
 	if protocol == consts.IPPROTO_TCP {
-		routingResult, err = retryRetrieveRoutingResult(c.ctx, func() (*bpfRoutingResult, error) {
+		routingResult, err = retryRetrieveRoutingResult(lookupContext, func() (*bpfRoutingResult, error) {
 			return c.core.RetrieveRoutingResult(source, destination, protocol)
 		}, externalPolicyMetadataAttempts, tcpRoutingLookupRetryDelay)
 	} else {

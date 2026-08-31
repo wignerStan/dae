@@ -104,6 +104,33 @@ During a dae hot reload, the new control-plane generation transfers a new set
 of listener descriptors. sing-box replaces only the listeners; established
 TCP routes and UDP NAT sessions remain owned by sing-box.
 
+Restarting sing-box is different from a dae reload: the old control channel is
+retired and dae deliberately does not reconnect a replacement producer on its
+own. Start sing-box first, then reload (or restart) dae so a fresh listener
+generation can be handed over. This fail-closed behavior prevents traffic from
+silently returning to dae's legacy userspace router.
+
+For a staged recovery reload with no dae-owned subscriptions, dae skips its
+public HTTP network-readiness probe. The retired external session is
+intentionally unable to carry that probe, so waiting for it would deadlock the
+handoff until the reload timeout. Configurations that still use dae
+subscriptions retain the readiness probe; set `disable_waiting_network` only
+when their bootstrap path is independently guaranteed.
+
+## Contract tests
+
+Run the Linux contract target on an isolated, privileged test VM:
+
+```shell
+make sing-box-datapath-test
+```
+
+The target runs the Unix `SOCK_SEQPACKET` envelope/descriptor tests, external
+policy session tests, and the generated eBPF probes. It requires `CAP_BPF`,
+`CAP_NET_ADMIN`, and a matching kernel BTF; it must not be run against a
+production datapath. The `dae_stub_ebpf` tag is reserved for compile-only CI
+coverage and does not replace this VM test.
+
 ## Metadata
 
 For each new TCP connection or UDP association, sing-box requests metadata by
