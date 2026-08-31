@@ -1,0 +1,27 @@
+name: Export standalone eBPF provider candidate
+
+on:
+  push:
+    branches:
+      - tmp/export-ebpfinbound-candidate-20260831
+
+permissions:
+  contents: read
+
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: tmp/export-ebpfinbound-candidate-20260831
+      - name: Reconstruct candidate
+        run: |
+          cat .github/ebpfinbound-build/source/part-* | base64 -d > /tmp/ebpfinbound-source.tar.gz
+          echo 'fa3d40e6e8b60eb636242dcdbbd39fced5ac3b7cbad7c1382b5a59ec64364180  /tmp/ebpfinbound-source.tar.gz' | sha256sum -c -
+          gzip -t /tmp/ebpfinbound-source.tar.gz
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ebpfinbound-source-candidate
+          path: /tmp/ebpfinbound-source.tar.gz
+          retention-days: 2
