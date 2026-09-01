@@ -1,0 +1,24 @@
+validate-publish	Generate BPF bindings and module sums	﻿2026-09-01T08:50:03.8095566Z ##[group]Run set -euxo pipefail
+validate-publish	Generate BPF bindings and module sums	2026-09-01T08:50:03.8095918Z ^[[36;1mset -euxo pipefail^[[0m
+validate-publish	Generate BPF bindings and module sums	2026-09-01T08:50:03.8096181Z ^[[36;1mcd ebpfinbound^[[0m
+validate-publish	Generate BPF bindings and module sums	2026-09-01T08:50:03.8096418Z ^[[36;1mgo generate ./...^[[0m
+validate-publish	Generate BPF bindings and module sums	2026-09-01T08:50:03.8096653Z ^[[36;1mgo mod tidy^[[0m
+validate-publish	Generate BPF bindings and module sums	2026-09-01T08:50:03.8096864Z ^[[36;1mgofmt -w .^[[0m
+validate-publish	Generate BPF bindings and module sums	2026-09-01T08:50:03.8135400Z shell: /usr/bin/bash --noprofile --norc -e -o pipefail {0}
+validate-publish	Generate BPF bindings and module sums	2026-09-01T08:50:03.8135756Z env:
+validate-publish	Generate BPF bindings and module sums	2026-09-01T08:50:03.8135950Z   GOTOOLCHAIN: local
+validate-publish	Generate BPF bindings and module sums	2026-09-01T08:50:03.8136174Z ##[endgroup]
+validate-publish	Generate BPF bindings and module sums	2026-09-01T08:50:03.8197081Z + cd ebpfinbound
+validate-publish	Generate BPF bindings and module sums	2026-09-01T08:50:03.8197463Z + go generate ./...
+validate-publish	Generate BPF bindings and module sums	2026-09-01T08:50:06.7078804Z go: downloading github.com/cilium/ebpf v0.20.0
+validate-publish	Generate BPF bindings and module sums	2026-09-01T08:50:07.2631790Z go: downloading golang.org/x/sys v0.37.0
+validate-publish	Generate BPF bindings and module sums	2026-09-01T08:50:19.5781268Z ##[error]Error: can't write /home/runner/work/dae/dae/ebpfinbound/bpf_bpfel.go: type name "bpfDaeParam" is used multiple times
+validate-publish	Generate BPF bindings and module sums	2026-09-01T08:50:19.5789486Z exit status 1
+validate-publish	Generate BPF bindings and module sums	2026-09-01T08:50:19.6918799Z Traceback (most recent call last):
+validate-publish	Generate BPF bindings and module sums	2026-09-01T08:50:19.6919723Z   File "/home/runner/work/dae/dae/ebpfinbound/internal/generate.py", line 50, in <module>
+validate-publish	Generate BPF bindings and module sums	2026-09-01T08:50:19.6920925Z     subprocess.run(command, cwd=module, env=environment, check=True)
+validate-publish	Generate BPF bindings and module sums	2026-09-01T08:50:19.6921577Z   File "/usr/lib/python3.12/subprocess.py", line 571, in run
+validate-publish	Generate BPF bindings and module sums	2026-09-01T08:50:19.6922152Z     raise CalledProcessError(retcode, process.args,
+validate-publish	Generate BPF bindings and module sums	2026-09-01T08:50:19.6925008Z subprocess.CalledProcessError: Command '['go', 'run', '-mod=mod', 'github.com/cilium/ebpf/cmd/bpf2go@v0.20.0', '-cc', 'clang', '-no-strip', '-cflags', '-DMAX_MATCH_SET_LEN=1024 -DDAE_CAPTURE_ONLY=1 -O2 -Wall -Werror', '-target', 'bpfel,bpfeb', '-type', 'dae_param', '-type', 'tuples_key', '-type', 'conn_state', '-type', 'routing_handoff_entry', 'bpf', '/tmp/dae-ebpfinbound-generate-uwo9jrhk/kern/tproxy.c', '--', '-I/tmp/dae-ebpfinbound-generate-uwo9jrhk/kern/headers']' returned non-zero exit status 1.
+validate-publish	Generate BPF bindings and module sums	2026-09-01T08:50:19.7101352Z generate.go:5: running "python3": exit status 1
+validate-publish	Generate BPF bindings and module sums	2026-09-01T08:50:19.7117851Z ##[error]Process completed with exit code 1.
