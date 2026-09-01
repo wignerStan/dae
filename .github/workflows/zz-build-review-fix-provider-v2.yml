@@ -39,6 +39,11 @@ jobs:
           path = Path('.github/review-fix/build-provider-v2.sh')
           text = path.read_text()
           text = text.replace(
+              'cp control/kern/tproxy.c /tmp/ebpfinbound/bpf/capture.c\n',
+              'cp control/kern/tproxy.c /tmp/ebpfinbound/bpf/capture.c\ncp control/kern/ebpf_sync_defs.h /tmp/ebpfinbound/bpf/ebpf_sync_defs.h\n',
+              1,
+          )
+          text = text.replace(
               'cd /tmp/ebpfinbound\ngo generate ./...',
               'cd /tmp/ebpfinbound\ngo mod tidy\ngo generate ./...',
               1,
