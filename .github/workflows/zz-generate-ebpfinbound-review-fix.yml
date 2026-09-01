@@ -1,0 +1,72 @@
+name: Generate eBPF inbound review fix
+
+on:
+  push:
+    branches:
+      - tmp/generate-ebpfinbound-review-fix-20260901
+
+permissions:
+  contents: read
+
+concurrency:
+  group: generate-ebpfinbound-review-fix
+  cancel-in-progress: true
+
+jobs:
+  generate:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          submodules: recursive
+      - uses: actions/setup-go@v6
+        with:
+          go-version: 1.26.0
+          cache: false
+      - name: Install eBPF toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang llvm libbpf-dev iproute2
+      - name: Reconstruct ordinary source candidate
+        shell: bash
+        run: |
+          set -euxo pipefail
+          cat .github/ebpfinbound-review-fix/part-* | base64 -d > /tmp/ebpfinbound-source.tar.gz
+          echo '55a8dd9b5f696bf457f6f3f44a4b22121a874922db8cf29888df121560c550fc  /tmp/ebpfinbound-source.tar.gz' | sha256sum -c -
+          rm -rf ebpfinbound
+          tar -xzf /tmp/ebpfinbound-source.tar.gz
+      - name: Generate bindings and module metadata
+        working-directory: ebpfinbound
+        run: |
+          set -euxo pipefail
+          go generate ./...
+          go mod tidy
+          find . -name '*.go' -print0 | xargs -0 gofmt -w
+          test -s bpf_bpfel.o
+          test -s bpf_bpfeb.o
+      - name: Package generated candidate
+        run: |
+          set -euxo pipefail
+          tar -czf /tmp/ebpfinbound-generated.tar.gz ebpfinbound .github/workflows/ebpfinbound.yml
+          sha256sum /tmp/ebpfinbound-generated.tar.gz > /tmp/ebpfinbound-generated.sha256
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ebpfinbound-generated-review-fix
+          path: |
+            /tmp/ebpfinbound-generated.tar.gz
+            /tmp/ebpfinbound-generated.sha256
+          retention-days: 3
+      - name: Validate module
+        working-directory: ebpfinbound
+        run: |
+          set -euxo pipefail
+          go test -race ./...
+          go vet ./...
+          deps=$(go list -deps ./...)
+          if grep -E 'github.com/daeuniverse/dae/(control|config|common|component|cmd|pkg)|github.com/daeuniverse/outbound|github.com/olicesx/quic-go|github.com/quic-go/qpack|github.com/sirupsen/logrus' <<<"$deps"; then
+            echo 'daemon, policy, outbound, QUIC, or daemon logging dependency leaked into ebpfinbound' >&2
+            exit 1
+          fi
+          go test -run TestCaptureSpecIsPruned .
+          git diff --check
