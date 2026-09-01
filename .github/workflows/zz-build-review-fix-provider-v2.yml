@@ -40,7 +40,7 @@ jobs:
           text = path.read_text()
           text = text.replace(
               'cd /tmp/ebpfinbound\ngo generate ./...',
-              'cd /tmp/ebpfinbound\ngo mod download\ngo generate ./...',
+              'cd /tmp/ebpfinbound\ngo mod download github.com/cilium/ebpf\ngo mod download\ngo generate ./...',
               1,
           )
           path.write_text(text)
