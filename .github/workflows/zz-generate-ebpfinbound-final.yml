@@ -36,7 +36,7 @@ jobs:
           echo 'e6d6c3ed81073ecf814898d5e6bd0bd1c9b3e8c7773df2dac461e1c1767212fa  /tmp/ebpfinbound-source.tar.gz' | sha256sum -c -
           rm -rf ebpfinbound
           mkdir ebpfinbound
-          tar -xzf /tmp/ebpfinbound-source.tar.gz -C ebpfinbound
+          tar -xzf /tmp/ebpfinbound-source.tar.gz --strip-components=1 -C ebpfinbound
           chmod +x ebpfinbound/internal/generate-bpf.sh
       - name: Generate checked-in BPF assets
         working-directory: ebpfinbound
