@@ -38,70 +38,9 @@ jobs:
           mkdir ebpfinbound
           tar -xzf /tmp/ebpfinbound-source.tar.gz --strip-components=1 -C ebpfinbound
           chmod +x ebpfinbound/internal/generate-bpf.sh
-          python3 - <<'PY'
-          from pathlib import Path
-          script = Path('ebpfinbound/internal/generate-bpf.sh')
-          text = script.read_text()
-          text = text.replace('  -type dae_param \\\n', '')
-          script.write_text(text)
-          Path('ebpfinbound/abi_linux.go').write_text(r'''//go:build linux
-
-// SPDX-License-Identifier: AGPL-3.0-only
-
-package ebpfinbound
-
-// bpfDaeParam mirrors struct dae_param in dae's reviewed capture source.
-// It is maintained explicitly because clang emits duplicate BTF declarations
-// for this const-volatile data-section type on some supported toolchains.
-type bpfDaeParam struct {
-	TproxyPort           uint32
-	ControlPlanePid      uint32
-	Dae0Ifindex          uint32
-	DaeNetnsId           uint32
-	Dae0peerMac          [6]uint8
-	PaddingAfterMac      [2]uint8
-	UseRedirectPeer      uint8
-	HasBpfGetCurrentTask uint8
-	Padding2             uint16
-	DaeSocketMark        uint32
-}
-''')
-          Path('ebpfinbound/abi_linux_test.go').write_text(r'''//go:build linux
-
-package ebpfinbound
-
-import (
-	"testing"
-	"unsafe"
-)
-
-func TestDaeParamABI(t *testing.T) {
-	var value bpfDaeParam
-	if size := unsafe.Sizeof(value); size != 32 {
-		t.Fatalf("dae_param size = %d, want 32", size)
-	}
-	checks := []struct {
-		name string
-		got  uintptr
-		want uintptr
-	}{
-		{"TproxyPort", unsafe.Offsetof(value.TproxyPort), 0},
-		{"ControlPlanePid", unsafe.Offsetof(value.ControlPlanePid), 4},
-		{"Dae0Ifindex", unsafe.Offsetof(value.Dae0Ifindex), 8},
-		{"DaeNetnsId", unsafe.Offsetof(value.DaeNetnsId), 12},
-		{"Dae0peerMac", unsafe.Offsetof(value.Dae0peerMac), 16},
-		{"UseRedirectPeer", unsafe.Offsetof(value.UseRedirectPeer), 24},
-		{"HasBpfGetCurrentTask", unsafe.Offsetof(value.HasBpfGetCurrentTask), 25},
-		{"DaeSocketMark", unsafe.Offsetof(value.DaeSocketMark), 28},
-	}
-	for _, check := range checks {
-		if check.got != check.want {
-			t.Errorf("%s offset = %d, want %d", check.name, check.got, check.want)
-		}
-	}
-}
-''')
-          PY
+          sed -i '/^[[:space:]]*-type dae_param/d' ebpfinbound/internal/generate-bpf.sh
+          echo 'Ly9nbzpidWlsZCBsaW51eAoKLy8gU1BEWC1MaWNlbnNlLUlkZW50aWZpZXI6IEFHUEwtMy4wLW9ubHkKCnBhY2thZ2UgZWJwZmluYm91bmQKCi8vIGJwZkRhZVBhcmFtIG1pcnJvcnMgc3RydWN0IGRhZV9wYXJhbSBpbiBkYWUncyByZXZpZXdlZCBjYXB0dXJlIHNvdXJjZS4KLy8gSXQgaXMgbWFpbnRhaW5lZCBleHBsaWNpdGx5IGJlY2F1c2UgY2xhbmcgZW1pdHMgZHVwbGljYXRlIEJURiBkZWNsYXJhdGlvbnMKLy8gZm9yIHRoaXMgY29uc3Qtdm9sYXRpbGUgZGF0YS1zZWN0aW9uIHR5cGUgb24gc29tZSBzdXBwb3J0ZWQgdG9vbGNoYWlucy4KdHlwZSBicGZEYWVQYXJhbSBzdHJ1Y3QgewoJVHByb3h5UG9ydCAgICAgICAgICAgdWludDMyCglDb250cm9sUGxhbmVQaWQgICAgICB1aW50MzIKCURhZTBJZmluZGV4ICAgICAgICAgIHVpbnQzMgoJRGFlTmV0bnNJZCAgICAgICAgICAgdWludDMyCglEYWUwcGVlck1hYyAgICAgICAgICBbNl11aW50OAoJUGFkZGluZ0FmdGVyTWFjICAgICAgWzJddWludDgKCVVzZVJlZGlyZWN0UGVlciAgICAgIHVpbnQ4CglIYXNCcGZHZXRDdXJyZW50VGFzayB1aW50OAoJUGFkZGluZzIgICAgICAgICAgICAgdWludDE2CglEYWVTb2NrZXRNYXJrICAgICAgICB1aW50MzIKfQo=' | base64 -d > ebpfinbound/abi_linux.go
+          echo 'Ly9nbzpidWlsZCBsaW51eAoKcGFja2FnZSBlYnBmaW5ib3VuZAoKaW1wb3J0ICgKCSJ0ZXN0aW5nIgoJInVuc2FmZSIKKQoKZnVuYyBUZXN0RGFlUGFyYW1BQkkodCAqdGVzdGluZy5UKSB7Cgl2YXIgdmFsdWUgYnBmRGFlUGFyYW0KCWlmIHNpemUgOj0gdW5zYWZlLlNpemVvZih2YWx1ZSk7IHNpemUgIT0gMzIgewoJCXQuRmF0YWxmKCJkYWVfcGFyYW0gc2l6ZSA9ICVkLCB3YW50IDMyIiwgc2l6ZSkKCX0KCWNoZWNrcyA6PSBbXXN0cnVjdCB7CgkJbmFtZSBzdHJpbmcKCQlnb3QgIHVpbnRwdHIKCQl3YW50IHVpbnRwdHIKCX17CgkJeyJUcHJveHlQb3J0IiwgdW5zYWZlLk9mZnNldG9mKHZhbHVlLlRwcm94eVBvcnQpLCAwfSwKCQl7IkNvbnRyb2xQbGFuZVBpZCIsIHVuc2FmZS5PZmZzZXRvZih2YWx1ZS5Db250cm9sUGxhbmVQaWQpLCA0fSwKCQl7IkRhZTBJZmluZGV4IiwgdW5zYWZlLk9mZnNldG9mKHZhbHVlLkRhZTBJZmluZGV4KSwgOH0sCgkJeyJEYWVOZXRuc0lkIiwgdW5zYWZlLk9mZnNldG9mKHZhbHVlLkRhZU5ldG5zSWQpLCAxMn0sCgkJeyJEYWUwcGVlck1hYyIsIHVuc2FmZS5PZmZzZXRvZih2YWx1ZS5EYWUwcGVlck1hYyksIDE2fSwKCQl7IlVzZVJlZGlyZWN0UGVlciIsIHVuc2FmZS5PZmZzZXRvZih2YWx1ZS5Vc2VSZWRpcmVjdFBlZXIpLCAyNH0sCgkJeyJIYXNCcGZHZXRDdXJyZW50VGFzayIsIHVuc2FmZS5PZmZzZXRvZih2YWx1ZS5IYXNCcGZHZXRDdXJyZW50VGFzayksIDI1fSwKCQl7IkRhZVNvY2tldE1hcmsiLCB1bnNhZmUuT2Zmc2V0b2YodmFsdWUuRGFlU29ja2V0TWFyayksIDI4fSwKCX0KCWZvciBfLCBjaGVjayA6PSByYW5nZSBjaGVja3MgewoJCWlmIGNoZWNrLmdvdCAhPSBjaGVjay53YW50IHsKCQkJdC5FcnJvcmYoIiVzIG9mZnNldCA9ICVkLCB3YW50ICVkIiwgY2hlY2submFtZSwgY2hlY2suZ290LCBjaGVjay53YW50KQoJCX0KCX0KfQo=' | base64 -d > ebpfinbound/abi_linux_test.go
       - name: Generate checked-in BPF assets
         working-directory: ebpfinbound
         shell: bash
