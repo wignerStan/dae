@@ -29,6 +29,7 @@ jobs:
           set -euo pipefail
           rm -rf /tmp/ebpfinbound-gen
           mkdir -p /tmp/ebpfinbound-gen
+          ln -s "$GITHUB_WORKSPACE/control/kern/headers" /tmp/ebpfinbound-gen/headers
           cat > /tmp/ebpfinbound-gen/go.mod <<'EOF'
           module generator.local/ebpfinbound
 
@@ -92,7 +93,7 @@ jobs:
             -type tuples_key \
             -type conn_state \
             -type routing_handoff_entry \
-            kernel ./tproxy_capture.c -- -I"$GITHUB_WORKSPACE/control/kern/headers"
+            kernel ./tproxy_capture.c -- -I/tmp/ebpfinbound-gen
           python3 - <<'PY'
           from pathlib import Path
           for name in ('kernel_bpfel.go', 'kernel_bpfeb.go'):
