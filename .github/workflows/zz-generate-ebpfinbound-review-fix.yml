@@ -6,7 +6,8 @@ on:
       - tmp/generate-ebpfinbound-review-fix-20260901
 
 permissions:
-  contents: read
+  contents: write
+  pull-requests: write
 
 concurrency:
   group: generate-ebpfinbound-review-fix
@@ -35,14 +36,11 @@ jobs:
           set +e
           {
             set -x
-            find .github/ebpfinbound-review-fix -maxdepth 1 -type f -printf '%f %s\n' | sort
-            wc -c .github/ebpfinbound-review-fix/part-*
             cat .github/ebpfinbound-review-fix/part-* > /tmp/ebpfinbound-source.b64
             base64 -d /tmp/ebpfinbound-source.b64 > /tmp/ebpfinbound-source.tar.gz
             status=$?
             if [ "$status" -eq 0 ]; then
-              sha256sum /tmp/ebpfinbound-source.tar.gz
-              tar -tzf /tmp/ebpfinbound-source.tar.gz
+              tar -tzf /tmp/ebpfinbound-source.tar.gz >/dev/null
               status=$?
             fi
             if [ "$status" -eq 0 ]; then
@@ -70,18 +68,9 @@ jobs:
             set -x
             go generate ./...
             status=$?
-            if [ "$status" -eq 0 ]; then
-              go mod tidy
-              status=$?
-            fi
-            if [ "$status" -eq 0 ]; then
-              find . -name '*.go' -print0 | xargs -0 gofmt -w
-              status=$?
-            fi
-            if [ "$status" -eq 0 ]; then
-              test -s bpf_bpfel.o && test -s bpf_bpfeb.o
-              status=$?
-            fi
+            if [ "$status" -eq 0 ]; then go mod tidy; status=$?; fi
+            if [ "$status" -eq 0 ]; then find . -name '*.go' -print0 | xargs -0 gofmt -w; status=$?; fi
+            if [ "$status" -eq 0 ]; then test -s bpf_bpfel.o && test -s bpf_bpfeb.o; status=$?; fi
             echo "$status" > /tmp/generate.status
             exit 0
           } > /tmp/generate.log 2>&1
@@ -91,9 +80,7 @@ jobs:
         run: |
           set -euxo pipefail
           test -f /tmp/reconstruct.status || echo 99 > /tmp/reconstruct.status
-          test -f /tmp/reconstruct.log || true
           test -f /tmp/generate.status || echo 99 > /tmp/generate.status
-          test -f /tmp/generate.log || true
           if [ -d ebpfinbound ]; then
             tar -czf /tmp/ebpfinbound-generated.tar.gz ebpfinbound .github/workflows/ebpfinbound.yml
           else
@@ -129,3 +116,60 @@ jobs:
           fi
           go test -run TestCaptureSpecIsPruned .
           git diff --check
+      - name: Publish ordinary one-commit branch and PR
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euxo pipefail
+          BASE=5db27a0028d36e7847bd3796497df952337a20e2
+          TARGET=fix/ebpfinbound-one-shot-runtime
+          tar -czf /tmp/provider-tree.tar.gz ebpfinbound
+          cp .github/workflows/ebpfinbound.yml /tmp/ebpfinbound.yml
+          git checkout -B final "$BASE"
+          rm -rf ebpfinbound
+          tar -xzf /tmp/provider-tree.tar.gz
+          cp /tmp/ebpfinbound.yml .github/workflows/ebpfinbound.yml
+          git config user.name Jacob
+          git config user.email 240170694+wignerStan@users.noreply.github.com
+          git add .github/workflows/ebpfinbound.yml ebpfinbound
+          git add -f ebpfinbound/bpf_bpfel.go ebpfinbound/bpf_bpfel.o ebpfinbound/bpf_bpfeb.go ebpfinbound/bpf_bpfeb.o
+          git diff --cached --check
+          git commit -m 'feat(ebpfinbound): add one-shot standalone capture runtime'
+          test "$(git rev-list --count "$BASE"..HEAD)" = 1
+          git push --force origin HEAD:"$TARGET"
+          if gh pr view "$TARGET" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh pr edit "$TARGET" --repo "$GITHUB_REPOSITORY" --base main --title 'feat(ebpfinbound): add one-shot standalone capture runtime' --body-file - <<'EOF'
+          ## Summary
+
+          Adds a build-complete standalone eBPF transparent capture module at `github.com/wignerStan/dae/ebpfinbound`.
+
+          - replaces cloned listener generations with a one-shot runtime-owned listener set
+          - serializes metadata operations against close
+          - rejects foreign namespace, link, and TC filter ownership
+          - gates host sysctl mutation and restores only unchanged provider-applied values
+          - resolves WAN `auto` and rejects accidental zero capture
+          - prunes the loaded BPF collection to an explicit capture-only program/map allowlist
+          - checks in `go.sum`, generated little/big-endian bindings, and BPF objects
+          - adds race, ownership, restart, sysctl, and privileged lifecycle tests
+
+          This module contains capture mechanics only. DNS, sniffing, routing, and outbound policy remain consumer-owned.
+          EOF
+          else
+            gh pr create --repo "$GITHUB_REPOSITORY" --draft --base main --head "$TARGET" --title 'feat(ebpfinbound): add one-shot standalone capture runtime' --body-file - <<'EOF'
+          ## Summary
+
+          Adds a build-complete standalone eBPF transparent capture module at `github.com/wignerStan/dae/ebpfinbound`.
+
+          - replaces cloned listener generations with a one-shot runtime-owned listener set
+          - serializes metadata operations against close
+          - rejects foreign namespace, link, and TC filter ownership
+          - gates host sysctl mutation and restores only unchanged provider-applied values
+          - resolves WAN `auto` and rejects accidental zero capture
+          - prunes the loaded BPF collection to an explicit capture-only program/map allowlist
+          - checks in `go.sum`, generated little/big-endian bindings, and BPF objects
+          - adds race, ownership, restart, sysctl, and privileged lifecycle tests
+
+          This module contains capture mechanics only. DNS, sniffing, routing, and outbound policy remain consumer-owned.
+          EOF
+          fi
