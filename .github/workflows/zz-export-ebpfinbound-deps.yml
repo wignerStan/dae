@@ -1,0 +1,52 @@
+name: Export eBPF inbound dependencies
+
+on:
+  push:
+    branches:
+      - tmp/export-ebpfinbound-deps-20260901
+
+permissions:
+  contents: read
+
+jobs:
+  export:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version: 1.26.0
+          cache: false
+      - name: Download standalone dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf /tmp/provider /tmp/gomodcache
+          mkdir -p /tmp/provider /tmp/gomodcache
+          cat > /tmp/provider/go.mod <<'EOF'
+          module local/provider
+
+          go 1.24.0
+
+          require (
+            github.com/cilium/ebpf v0.20.0
+            github.com/vishvananda/netlink v1.3.1
+            github.com/vishvananda/netns v0.0.5
+            golang.org/x/sys v0.41.0
+          )
+          EOF
+          cd /tmp/provider
+          GOMODCACHE=/tmp/gomodcache go mod download all
+          go mod tidy
+          cp go.mod go.sum /tmp/
+          tar -C /tmp -czf /tmp/ebpfinbound-gomodcache.tar.gz gomodcache
+          sha256sum /tmp/ebpfinbound-gomodcache.tar.gz > /tmp/SHA256SUMS
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ebpfinbound-gomodcache
+          path: |
+            /tmp/ebpfinbound-gomodcache.tar.gz
+            /tmp/go.mod
+            /tmp/go.sum
+            /tmp/SHA256SUMS
+          retention-days: 1
