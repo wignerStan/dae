@@ -87,7 +87,7 @@ jobs:
           GOPACKAGE=ebpfinbound go run -mod=mod github.com/cilium/ebpf/cmd/bpf2go@v0.20.0 \
             -cc clang \
             -no-strip \
-            -cflags '-DMAX_MATCH_SET_LEN=1024 -O2 -Wall -Werror' \
+            -cflags '-DMAX_MATCH_SET_LEN=1024 -O2 -Wall -Werror -Wno-unused-function' \
             -tags '!dae_stub_ebpf' \
             -target 'bpfel,bpfeb' \
             -type dae_param \
