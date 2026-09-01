@@ -1,0 +1,33 @@
+name: Export review-fix source
+
+on:
+  push:
+    branches:
+      - tmp/export-review-fix-dae-20260831
+
+permissions:
+  contents: read
+
+jobs:
+  export:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          submodules: recursive
+      - name: Archive exact dae base
+        shell: bash
+        run: |
+          set -euo pipefail
+          git checkout --detach 5db27a0028d36e7847bd3796497df952337a20e2
+          git submodule update --init --recursive
+          tar --exclude=.git --exclude='*/.git' -czf /tmp/dae-source.tar.gz .
+          sha256sum /tmp/dae-source.tar.gz > /tmp/dae-source.sha256
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dae-review-fix-source
+          path: |
+            /tmp/dae-source.tar.gz
+            /tmp/dae-source.sha256
+          retention-days: 2
