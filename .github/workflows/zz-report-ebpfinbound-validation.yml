@@ -1,0 +1,52 @@
+name: Report eBPF inbound validation
+
+on:
+  push:
+    branches:
+      - tmp/validate-ebpfinbound-one-shot-20260901
+
+permissions:
+  actions: read
+  contents: write
+
+jobs:
+  report:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - name: Wait for matching validation run
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          run_id=
+          for attempt in $(seq 1 240); do
+            run_id=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow 'Validate and publish one-shot eBPF inbound' --branch "$GITHUB_REF_NAME" --limit 20 --json databaseId,headSha,status --jq '.[] | select(.headSha == "'"$GITHUB_SHA"'") | .databaseId' | head -1)
+            if [ -n "$run_id" ]; then
+              status=$(gh run view "$run_id" --repo "$GITHUB_REPOSITORY" --json status --jq .status)
+              if [ "$status" = completed ]; then break; fi
+            fi
+            sleep 5
+          done
+          test -n "$run_id"
+          test "$(gh run view "$run_id" --repo "$GITHUB_REPOSITORY" --json status --jq .status)" = completed
+          mkdir -p /tmp/result
+          gh run view "$run_id" --repo "$GITHUB_REPOSITORY" --json databaseId,headSha,status,conclusion,url,jobs > /tmp/result/result.json
+          gh run view "$run_id" --repo "$GITHUB_REPOSITORY" --log-failed > /tmp/result/failed.log || true
+          printf '%s\n' "$GITHUB_SHA" > /tmp/result/reported-head
+      - name: Publish diagnostic result
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name Jacob
+          git config user.email 240170694+wignerStan@users.noreply.github.com
+          git checkout --orphan result
+          git rm -rf .
+          cp -a /tmp/result/. .
+          git add -A
+          git commit -m 'ci: report eBPF inbound validation result'
+          git push --force origin HEAD:refs/heads/tmp/ebpfinbound-validation-result
