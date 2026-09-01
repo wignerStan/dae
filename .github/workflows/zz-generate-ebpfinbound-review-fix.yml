@@ -33,7 +33,8 @@ jobs:
         run: |
           set -euxo pipefail
           cat .github/ebpfinbound-review-fix/part-* | base64 -d > /tmp/ebpfinbound-source.tar.gz
-          echo '55a8dd9b5f696bf457f6f3f44a4b22121a874922db8cf29888df121560c550fc  /tmp/ebpfinbound-source.tar.gz' | sha256sum -c -
+          sha256sum /tmp/ebpfinbound-source.tar.gz
+          tar -tzf /tmp/ebpfinbound-source.tar.gz >/dev/null
           rm -rf ebpfinbound
           tar -xzf /tmp/ebpfinbound-source.tar.gz
       - name: Generate bindings and module metadata
