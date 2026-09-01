@@ -45,7 +45,7 @@ jobs:
           )
           text = text.replace(
               'cd /tmp/ebpfinbound\ngo generate ./...',
-              "cd /tmp/ebpfinbound\ngo mod tidy\nsed -i 's/ -type dae_param//' generate.go\ngo generate ./...",
+              "cd /tmp/ebpfinbound\ngo mod tidy\nsed -i 's/ -type dae_param//' generate.go\nsed -i '/^[[:space:]]*\"net\"$/d' preflight_linux.go\ngo generate ./...",
               1,
           )
           path.write_text(text)
