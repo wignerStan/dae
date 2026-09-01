@@ -82,7 +82,7 @@ jobs:
             git diff --cached --check
             git commit -m 'feat(ebpfinbound): add one-shot standalone capture runtime'
             test "$(git rev-list --count "$BASE"..HEAD)" = 1
-            git push --force origin HEAD:"$TARGET"
+            git push --force origin HEAD:"refs/heads/$TARGET"
             status=$?
             echo "$status" > /tmp/publish.status
             exit 0
