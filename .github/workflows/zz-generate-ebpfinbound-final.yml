@@ -38,6 +38,70 @@ jobs:
           mkdir ebpfinbound
           tar -xzf /tmp/ebpfinbound-source.tar.gz --strip-components=1 -C ebpfinbound
           chmod +x ebpfinbound/internal/generate-bpf.sh
+          python3 - <<'PY'
+          from pathlib import Path
+          script = Path('ebpfinbound/internal/generate-bpf.sh')
+          text = script.read_text()
+          text = text.replace('  -type dae_param \\\n', '')
+          script.write_text(text)
+          Path('ebpfinbound/abi_linux.go').write_text(r'''//go:build linux
+
+// SPDX-License-Identifier: AGPL-3.0-only
+
+package ebpfinbound
+
+// bpfDaeParam mirrors struct dae_param in dae's reviewed capture source.
+// It is maintained explicitly because clang emits duplicate BTF declarations
+// for this const-volatile data-section type on some supported toolchains.
+type bpfDaeParam struct {
+	TproxyPort           uint32
+	ControlPlanePid      uint32
+	Dae0Ifindex          uint32
+	DaeNetnsId           uint32
+	Dae0peerMac          [6]uint8
+	PaddingAfterMac      [2]uint8
+	UseRedirectPeer      uint8
+	HasBpfGetCurrentTask uint8
+	Padding2             uint16
+	DaeSocketMark        uint32
+}
+''')
+          Path('ebpfinbound/abi_linux_test.go').write_text(r'''//go:build linux
+
+package ebpfinbound
+
+import (
+	"testing"
+	"unsafe"
+)
+
+func TestDaeParamABI(t *testing.T) {
+	var value bpfDaeParam
+	if size := unsafe.Sizeof(value); size != 32 {
+		t.Fatalf("dae_param size = %d, want 32", size)
+	}
+	checks := []struct {
+		name string
+		got  uintptr
+		want uintptr
+	}{
+		{"TproxyPort", unsafe.Offsetof(value.TproxyPort), 0},
+		{"ControlPlanePid", unsafe.Offsetof(value.ControlPlanePid), 4},
+		{"Dae0Ifindex", unsafe.Offsetof(value.Dae0Ifindex), 8},
+		{"DaeNetnsId", unsafe.Offsetof(value.DaeNetnsId), 12},
+		{"Dae0peerMac", unsafe.Offsetof(value.Dae0peerMac), 16},
+		{"UseRedirectPeer", unsafe.Offsetof(value.UseRedirectPeer), 24},
+		{"HasBpfGetCurrentTask", unsafe.Offsetof(value.HasBpfGetCurrentTask), 25},
+		{"DaeSocketMark", unsafe.Offsetof(value.DaeSocketMark), 28},
+	}
+	for _, check := range checks {
+		if check.got != check.want {
+			t.Errorf("%s offset = %d, want %d", check.name, check.got, check.want)
+		}
+	}
+}
+''')
+          PY
       - name: Generate checked-in BPF assets
         working-directory: ebpfinbound
         shell: bash
