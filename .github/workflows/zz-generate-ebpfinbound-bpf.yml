@@ -30,6 +30,7 @@ jobs:
           rm -rf /tmp/ebpfinbound-gen
           mkdir -p /tmp/ebpfinbound-gen
           ln -s "$GITHUB_WORKSPACE/control/kern/headers" /tmp/ebpfinbound-gen/headers
+          cp "$GITHUB_WORKSPACE"/control/kern/*.h /tmp/ebpfinbound-gen/
           cat > /tmp/ebpfinbound-gen/go.mod <<'EOF'
           module generator.local/ebpfinbound
 
