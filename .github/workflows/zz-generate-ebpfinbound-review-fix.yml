@@ -65,6 +65,7 @@ jobs:
             exit 0
           fi
           cd ebpfinbound
+          sed -i 's/-type dae_param -type port_range -type tuples_key -type conn_state -type routing_handoff_entry/-type port_range -type tuples_key/' internal/generate.sh
           {
             set -x
             go generate ./...
