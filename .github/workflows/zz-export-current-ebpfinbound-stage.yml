@@ -1,0 +1,33 @@
+name: Export current eBPF inbound stage
+
+on:
+  push:
+    branches:
+      - tmp/validate-ebpfinbound-one-shot-20260901
+
+permissions:
+  contents: read
+
+jobs:
+  export:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 1
+          submodules: recursive
+      - name: Archive exact source
+        shell: bash
+        run: |
+          set -euo pipefail
+          tar --exclude=.git -czf /tmp/dae-stage-source.tar.gz .
+          git rev-parse HEAD > /tmp/COMMIT
+          sha256sum /tmp/dae-stage-source.tar.gz > /tmp/SHA256SUMS
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dae-ebpfinbound-current-stage
+          path: |
+            /tmp/dae-stage-source.tar.gz
+            /tmp/COMMIT
+            /tmp/SHA256SUMS
+          retention-days: 2
