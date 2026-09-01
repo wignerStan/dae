@@ -1,0 +1,120 @@
+name: Generate capture-only eBPF inbound assets
+
+on:
+  push:
+    branches:
+      - tmp/generate-ebpfinbound-bpf-20260901
+
+permissions:
+  contents: read
+
+jobs:
+  generate:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          submodules: recursive
+      - uses: actions/setup-go@v6
+        with:
+          go-version: 1.26.0
+          cache: false
+      - name: Install compiler
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang llvm
+      - name: Generate capture-only bindings
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf /tmp/ebpfinbound-gen
+          mkdir -p /tmp/ebpfinbound-gen
+          cat > /tmp/ebpfinbound-gen/go.mod <<'EOF'
+          module generator.local/ebpfinbound
+
+          go 1.24.0
+
+          require github.com/cilium/ebpf v0.20.0
+          EOF
+          python3 - <<'PY'
+          from pathlib import Path
+
+          source = Path('control/kern/tproxy.c').read_text()
+          signature = 'static __noinline __s64 route(const __u32 *flag, const void *l4hdr,'
+          start = source.index(signature)
+          brace = source.index('{', start)
+          depth = 0
+          quote = None
+          escaped = False
+          end = None
+          for index in range(brace, len(source)):
+              char = source[index]
+              if quote:
+                  if escaped:
+                      escaped = False
+                  elif char == '\\':
+                      escaped = True
+                  elif char == quote:
+                      quote = None
+                  continue
+              if char in ('"', "'", '`'):
+                  quote = char
+              elif char == '{':
+                  depth += 1
+              elif char == '}':
+                  depth -= 1
+                  if depth == 0:
+                      end = index + 1
+                      break
+          if end is None:
+              raise SystemExit('route function end not found')
+          replacement = '''static __noinline __s64 route(const __u32 *flag, const void *l4hdr,
+                                      const __be32 *saddr, const __be32 *daddr,
+                                      const __be32 *mac)
+          {
+                  (void)flag;
+                  (void)l4hdr;
+                  (void)saddr;
+                  (void)daddr;
+                  (void)mac;
+                  return (__s64)OUTBOUND_CONTROL_PLANE_ROUTING;
+          }'''
+          Path('/tmp/ebpfinbound-gen/tproxy_capture.c').write_text(source[:start] + replacement + source[end:])
+          PY
+          cd /tmp/ebpfinbound-gen
+          GOPACKAGE=ebpfinbound go run -mod=mod github.com/cilium/ebpf/cmd/bpf2go@v0.20.0 \
+            -cc clang \
+            -no-strip \
+            -cflags '-DMAX_MATCH_SET_LEN=1024 -O2 -Wall -Werror' \
+            -tags '!dae_stub_ebpf' \
+            -target 'bpfel,bpfeb' \
+            -type dae_param \
+            -type tuples_key \
+            -type conn_state \
+            -type routing_handoff_entry \
+            kernel ./tproxy_capture.c -- -I"$GITHUB_WORKSPACE/control/kern/headers"
+          python3 - <<'PY'
+          from pathlib import Path
+          for name in ('kernel_bpfel.go', 'kernel_bpfeb.go'):
+              path = Path(name)
+              lines = path.read_text().splitlines()
+              for index, line in enumerate(lines):
+                  if line.startswith('//go:build '):
+                      expression = line.removeprefix('//go:build ')
+                      lines[index] = '//go:build linux && (' + expression + ')'
+                      break
+              else:
+                  raise SystemExit(f'build constraint missing from {name}')
+              path.write_text('\n'.join(lines) + '\n')
+          PY
+          sha256sum kernel_bpfel.go kernel_bpfel.o kernel_bpfeb.go kernel_bpfeb.o > SHA256SUMS
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ebpfinbound-capture-only-bpf
+          path: |
+            /tmp/ebpfinbound-gen/kernel_bpfel.go
+            /tmp/ebpfinbound-gen/kernel_bpfel.o
+            /tmp/ebpfinbound-gen/kernel_bpfeb.go
+            /tmp/ebpfinbound-gen/kernel_bpfeb.o
+            /tmp/ebpfinbound-gen/SHA256SUMS
+          retention-days: 2
