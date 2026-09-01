@@ -41,38 +41,39 @@ jobs:
           python3 - <<'PY'
           from pathlib import Path
 
+          def replace_function(source, signature, replacement, last=False):
+              start = source.rindex(signature) if last else source.index(signature)
+              brace = source.index('{', start)
+              depth = 0
+              quote = None
+              escaped = False
+              for index in range(brace, len(source)):
+                  char = source[index]
+                  if quote:
+                      if escaped:
+                          escaped = False
+                      elif char == '\\':
+                          escaped = True
+                      elif char == quote:
+                          quote = None
+                      continue
+                  if char in ('"', "'", '`'):
+                      quote = char
+                  elif char == '{':
+                      depth += 1
+                  elif char == '}':
+                      depth -= 1
+                      if depth == 0:
+                          return source[:start] + replacement + source[index + 1:]
+              raise SystemExit('function body not found: ' + signature)
+
           source = Path('control/kern/tproxy.c').read_text()
-          signature = 'static __noinline __s64 route(const __u32 *flag, const void *l4hdr,'
-          start = source.index(signature)
-          brace = source.index('{', start)
-          depth = 0
-          quote = None
-          escaped = False
-          end = None
-          for index in range(brace, len(source)):
-              char = source[index]
-              if quote:
-                  if escaped:
-                      escaped = False
-                  elif char == '\\':
-                      escaped = True
-                  elif char == quote:
-                      quote = None
-                  continue
-              if char in ('"', "'", '`'):
-                  quote = char
-              elif char == '{':
-                  depth += 1
-              elif char == '}':
-                  depth -= 1
-                  if depth == 0:
-                      end = index + 1
-                      break
-          if end is None:
-              raise SystemExit('route function end not found')
-          replacement = '''static __noinline __s64 route(const __u32 *flag, const void *l4hdr,
-                                      const __be32 *saddr, const __be32 *daddr,
-                                      const __be32 *mac)
+          source = replace_function(
+              source,
+              'static __noinline __s64 route(const __u32 *flag, const void *l4hdr,',
+              '''static __noinline __s64 route(const __u32 *flag, const void *l4hdr,
+                                    const __be32 *saddr, const __be32 *daddr,
+                                    const __be32 *mac)
           {
                   (void)flag;
                   (void)l4hdr;
@@ -80,8 +81,24 @@ jobs:
                   (void)daddr;
                   (void)mac;
                   return (__s64)OUTBOUND_CONTROL_PLANE_ROUTING;
-          }'''
-          Path('/tmp/ebpfinbound-gen/tproxy_capture.c').write_text(source[:start] + replacement + source[end:])
+          }''',
+          )
+          source = replace_function(
+              source,
+              'static __noinline bool\nwan_outbound_is_alive(struct __sk_buff *skb, __u8 outbound, __u8 l4proto,',
+              '''static __noinline bool
+          wan_outbound_is_alive(struct __sk_buff *skb, __u8 outbound, __u8 l4proto,
+                                __be16 dport)
+          {
+                  (void)skb;
+                  (void)outbound;
+                  (void)l4proto;
+                  (void)dport;
+                  return true;
+          }''',
+              last=True,
+          )
+          Path('/tmp/ebpfinbound-gen/tproxy_capture.c').write_text(source)
           PY
           cd /tmp/ebpfinbound-gen
           GOPACKAGE=ebpfinbound go run -mod=mod github.com/cilium/ebpf/cmd/bpf2go@v0.20.0 \
