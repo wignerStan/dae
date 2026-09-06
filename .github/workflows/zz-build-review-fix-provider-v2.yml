@@ -1,68 +1,14 @@
-name: Build and publish provider review fixes v2
+name: Build and publish provider review fixes v3
 
 on:
-  push:
-    branches:
-      - tmp/build-review-fix-provider-20260901
+  workflow_dispatch:
 
 permissions:
   contents: write
   pull-requests: write
 
-concurrency:
-  group: build-review-fix-provider-v2
-  cancel-in-progress: true
-
 jobs:
-  build-publish:
+  disabled:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v6
-        with:
-          fetch-depth: 0
-          submodules: recursive
-      - uses: actions/setup-go@v6
-        with:
-          go-version: 1.26.7
-          cache: false
-      - name: Install eBPF toolchain
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y clang llvm libbpf-dev iproute2
-      - name: Build, test and publish ordinary source
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -o pipefail
-          python3 - <<'PY'
-          from pathlib import Path
-          path = Path('.github/review-fix/build-provider-v2.sh')
-          text = path.read_text()
-          text = text.replace(
-              'cp control/kern/tproxy.c /tmp/ebpfinbound/bpf/capture.c\n',
-              'cp control/kern/tproxy.c /tmp/ebpfinbound/bpf/capture.c\ncp control/kern/ebpf_sync_defs.h /tmp/ebpfinbound/bpf/ebpf_sync_defs.h\n',
-              1,
-          )
-          text = text.replace(
-              'cd /tmp/ebpfinbound\ngo generate ./...',
-              "cd /tmp/ebpfinbound\ngo mod tidy\nsed -i 's/ -type dae_param//' generate.go\nsed -i '/^[[:space:]]*\"net\"$/d' preflight_linux.go\ngo generate ./...",
-              1,
-          )
-          path.write_text(text)
-          PY
-          bash .github/review-fix/build-provider-v2.sh 2>&1 | tee /tmp/provider-build.log
-      - name: Upload generated provider tree
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: provider-tree
-          path: /tmp/ebpfinbound
-          include-hidden-files: true
-          retention-days: 2
-      - name: Upload build diagnostics
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: provider-build-diagnostics
-          path: /tmp/provider-build.log
-          retention-days: 2
+      - run: echo 'publisher preparation in progress'
