@@ -30,10 +30,11 @@ jobs:
 
           path = Path('.github/workflows/zz-build-ebpfinbound-schema-v9.yml')
           text = path.read_text()
-          old = r'''          \tqdisc, qdiscCreated, err := ensureClsact(link)'''
-          new = r'''          \t_, qdiscCreated, err := ensureClsact(link)'''
-          if old not in text:
-              raise SystemExit('unused qdisc builder marker not found')
+          old = 'qdisc, qdiscCreated, err := ensureClsact(link)'
+          new = '_, qdiscCreated, err := ensureClsact(link)'
+          count = text.count(old)
+          if count != 1:
+              raise SystemExit(f'unexpected builder marker count: {count}')
           path.write_text(text.replace(old, new, 1))
           PY
           git diff --check
