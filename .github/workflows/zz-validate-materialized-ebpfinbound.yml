@@ -1,0 +1,93 @@
+name: Validate materialized eBPF inbound source
+
+on:
+  push:
+    branches:
+      - tmp/build-ebpfinbound-schema-v9-20260906-v1
+
+permissions:
+  contents: write
+
+concurrency:
+  group: validate-materialized-ebpfinbound
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: tmp/build-ebpfinbound-schema-v9-20260906-v1
+          fetch-depth: 0
+      - uses: actions/setup-go@v6
+        with:
+          go-version: 1.26.7
+          cache: false
+      - name: Install eBPF build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang llvm libbpf-dev iproute2
+      - name: Wait for and check out the isolated source tree
+        shell: bash
+        run: |
+          set -euxo pipefail
+          for attempt in $(seq 1 36); do
+            if git ls-remote --exit-code --heads origin refs/heads/tmp/ebpfinbound-schema-v9-materialized; then
+              break
+            fi
+            sleep 5
+          done
+          git fetch origin tmp/ebpfinbound-schema-v9-materialized
+          git worktree add --detach /tmp/dae-ebpfinbound-validated FETCH_HEAD
+          git -C /tmp/dae-ebpfinbound-validated submodule update --init --recursive
+      - name: Generate and verify provider
+        shell: bash
+        run: |
+          set -euxo pipefail
+          cd /tmp/dae-ebpfinbound-validated/ebpfinbound
+          go generate ./...
+          go mod tidy
+          gofmt -w .
+          go test -race ./...
+          go vet ./...
+          go test -tags dae_stub_ebpf ./...
+          go build ./...
+          deps=$(go list -deps ./...)
+          if grep -E 'github.com/daeuniverse/dae/(control|config|common|component|cmd|pkg)|github.com/daeuniverse/outbound|github.com/olicesx/quic-go|github.com/quic-go/qpack|github.com/sirupsen/logrus' <<<"$deps"; then
+            echo "private daemon, policy, outbound, QUIC, qpack, or logging dependency leaked into capture operation" >&2
+            exit 1
+          fi
+          ! grep -R 'CloneGeneration\|CommitGeneration\|OpenGeneration' --include='*.go' .
+          git diff --check
+      - name: Privileged lifecycle and real traffic
+        shell: bash
+        run: |
+          set -euxo pipefail
+          sudo mkdir -p /run/netns
+          cd /tmp/dae-ebpfinbound-validated/ebpfinbound
+          sudo --preserve-env=PATH env HOME="$HOME" \
+            go test -tags=integration -run TestPrivilegedCaptureLifecycleAndTraffic -count=1 -v .
+          ! ip link show dae-ebpf0
+          ! ip netns list | grep -q '^dae-ebpf-inbound'
+      - name: Run Schema-v9 aw-checker architecture scan
+        shell: bash
+        run: |
+          set -euxo pipefail
+          git clone https://github.com/wignerStan/aw-checker /tmp/aw-checker-schema-v9
+          git -C /tmp/aw-checker-schema-v9 checkout 55512af91b2a5783242be2f166db1d88b744b882
+          git clone https://github.com/wignerStan/infra /tmp/infra
+          cd /tmp/aw-checker-schema-v9
+          cargo run -p aw-checker -- \
+            scan --domains architecture /tmp/dae-ebpfinbound-validated/ebpfinbound
+      - name: Publish one reviewed commit
+        shell: bash
+        run: |
+          set -euxo pipefail
+          cd /tmp/dae-ebpfinbound-validated
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add control/kern/tproxy.c ebpfinbound .github/workflows/ebpfinbound.yml
+          git commit --amend -m "feat(ebpfinbound): own capture resources through one runtime"
+          git push origin HEAD:refs/heads/fix/ebpfinbound-schema-v9-ownership --force
