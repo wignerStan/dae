@@ -66,12 +66,12 @@ func ResolveConfig(ctx context.Context, config CaptureConfig) (CaptureConfig, Pr
 		return CaptureConfig{}, PreflightReport{}, errors.New("no capture interface matched the configured LAN/WAN selectors")
 	}
 	report := PreflightReport{
-		Config: config,
-		InterfaceNames: names,
+		Config:                 config,
+		InterfaceNames:         names,
 		DefaultRouteInterfaces: defaults,
-		CgroupV2Mounted: cgroupV2Mounted(),
-		BPFFSMounted: bpfFSMounted(),
-		ExistingResources: existingCaptureResources(),
+		CgroupV2Mounted:        cgroupV2Mounted(),
+		BPFFSMounted:           bpfFSMounted(),
+		ExistingResources:      existingCaptureResources(),
 	}
 	if !config.AutoConfigureKernel {
 		report.KernelProblems = verifyHostKernelSettings(config)
@@ -105,26 +105,43 @@ func resolveInterfacePatterns(selectors, names, defaults []string) ([]string, er
 	result := make([]string, 0)
 	seen := make(map[string]struct{})
 	add := func(name string) {
-		if _, ok := seen[name]; ok { return }
+		if _, ok := seen[name]; ok {
+			return
+		}
 		seen[name] = struct{}{}
 		result = append(result, name)
 	}
 	for _, selector := range selectors {
 		selector = strings.TrimSpace(selector)
-		if selector == "" { continue }
-		if selector == "auto" {
-			if defaults == nil { return nil, errors.New("auto is valid only for WAN interfaces") }
-			if len(defaults) == 0 { return nil, errors.New("auto did not resolve any default-route interface") }
-			for _, name := range defaults { add(name) }
+		if selector == "" {
 			continue
 		}
-		if _, err := path.Match(selector, "probe"); err != nil { return nil, fmt.Errorf("invalid pattern %q: %w", selector, err) }
+		if selector == "auto" {
+			if defaults == nil {
+				return nil, errors.New("auto is valid only for WAN interfaces")
+			}
+			if len(defaults) == 0 {
+				return nil, errors.New("auto did not resolve any default-route interface")
+			}
+			for _, name := range defaults {
+				add(name)
+			}
+			continue
+		}
+		if _, err := path.Match(selector, "probe"); err != nil {
+			return nil, fmt.Errorf("invalid pattern %q: %w", selector, err)
+		}
 		matched := false
 		for _, name := range names {
 			ok, _ := path.Match(selector, name)
-			if ok { add(name); matched = true }
+			if ok {
+				add(name)
+				matched = true
+			}
 		}
-		if !matched { return nil, fmt.Errorf("selector %q matched no current interface", selector) }
+		if !matched {
+			return nil, fmt.Errorf("selector %q matched no current interface", selector)
+		}
 	}
 	sort.Strings(result)
 	return result, nil
@@ -134,25 +151,39 @@ func defaultRouteInterfaces() []string {
 	seen := make(map[string]struct{})
 	for _, family := range []int{netlink.FAMILY_V4, netlink.FAMILY_V6} {
 		routes, err := netlink.RouteList(nil, family)
-		if err != nil { continue }
+		if err != nil {
+			continue
+		}
 		for _, route := range routes {
-			if route.Dst != nil || route.LinkIndex <= 0 { continue }
+			if route.Dst != nil || route.LinkIndex <= 0 {
+				continue
+			}
 			link, err := netlink.LinkByIndex(route.LinkIndex)
-			if err != nil || link == nil || link.Attrs() == nil { continue }
-			if name := link.Attrs().Name; name != "" && name != "lo" { seen[name] = struct{}{} }
+			if err != nil || link == nil || link.Attrs() == nil {
+				continue
+			}
+			if name := link.Attrs().Name; name != "" && name != "lo" {
+				seen[name] = struct{}{}
+			}
 		}
 	}
 	result := make([]string, 0, len(seen))
-	for name := range seen { result = append(result, name) }
+	for name := range seen {
+		result = append(result, name)
+	}
 	sort.Strings(result)
 	return result
 }
 
 func verifyHostKernelSettings(config CaptureConfig) []string {
-	if len(config.LANInterfaces) == 0 { return nil }
+	if len(config.LANInterfaces) == 0 {
+		return nil
+	}
 	checks := map[string]string{
-		"/proc/sys/net/ipv4/ip_forward": "1",
-		"/proc/sys/net/ipv6/conf/all/forwarding": "1",
+		"/proc/sys/net/ipv4/ip_forward":                  "1",
+		"/proc/sys/net/ipv6/conf/all/forwarding":         "1",
+		"/proc/sys/net/ipv4/conf/all/src_valid_mark":     "1",
+		"/proc/sys/net/ipv4/conf/default/src_valid_mark": "1",
 	}
 	for _, interfaceName := range config.LANInterfaces {
 		checks["/proc/sys/net/ipv4/conf/"+interfaceName+"/forwarding"] = "1"
@@ -161,38 +192,60 @@ func verifyHostKernelSettings(config CaptureConfig) []string {
 	}
 	var problems []string
 	paths := make([]string, 0, len(checks))
-	for sysctlPath := range checks { paths = append(paths, sysctlPath) }
+	for sysctlPath := range checks {
+		paths = append(paths, sysctlPath)
+	}
 	sort.Strings(paths)
-	for _, sysctlPath := range paths {
-		raw, err := os.ReadFile(sysctlPath)
+	for _, path := range paths {
+		raw, err := os.ReadFile(path)
 		if err != nil {
-			if strings.Contains(sysctlPath, "/ipv6/") && errors.Is(err, os.ErrNotExist) { continue }
-			problems = append(problems, fmt.Sprintf("read %s: %v", sysctlPath, err)); continue
+			if strings.Contains(path, "/ipv6/") && errors.Is(err, os.ErrNotExist) {
+				continue
+			}
+			problems = append(problems, fmt.Sprintf("%s unavailable: %v", path, err))
+			continue
 		}
 		current := strings.TrimSpace(string(raw))
-		if current != checks[sysctlPath] { problems = append(problems, fmt.Sprintf("%s=%s (need %s)", sysctlPath, current, checks[sysctlPath])) }
+		if current != checks[path] {
+			problems = append(problems, fmt.Sprintf("%s=%s (need %s)", path, current, checks[path]))
+		}
 	}
 	return problems
 }
 
-func cgroupV2Mounted() bool { _, err := detectCgroupPath(); return err == nil }
+func cgroupV2Mounted() bool {
+	_, err := detectCgroupPath()
+	return err == nil
+}
 
 func bpfFSMounted() bool {
 	data, err := os.ReadFile("/proc/mounts")
-	if err != nil { return false }
+	if err != nil {
+		return false
+	}
 	for _, line := range strings.Split(string(data), "\n") {
 		fields := strings.Fields(line)
-		if len(fields) >= 3 && fields[1] == "/sys/fs/bpf" && fields[2] == "bpf" { return true }
+		if len(fields) >= 3 && fields[1] == "/sys/fs/bpf" && fields[2] == "bpf" {
+			return true
+		}
 	}
 	return false
 }
 
 func existingCaptureResources() []string {
 	var result []string
-	if _, err := netlink.LinkByName(captureHostLink); err == nil { result = append(result, captureHostLink) }
-	if _, err := netlink.LinkByName(capturePeerLink); err == nil { result = append(result, capturePeerLink) }
-	if _, err := os.Stat("/run/netns/" + captureNetNSName); err == nil { result = append(result, captureNetNSName) }
-	if _, err := os.Stat(ownerRecordPath()); err == nil { result = append(result, ownerRecordPath()) }
+	if _, err := netlink.LinkByName(captureHostLink); err == nil {
+		result = append(result, captureHostLink)
+	}
+	if _, err := netlink.LinkByName(capturePeerLink); err == nil {
+		result = append(result, capturePeerLink)
+	}
+	if _, err := os.Stat("/run/netns/" + captureNetNSName); err == nil {
+		result = append(result, captureNetNSName)
+	}
+	if _, err := os.Stat(ownerRecordPath()); err == nil {
+		result = append(result, ownerRecordPath())
+	}
 	sort.Strings(result)
 	return result
 }
