@@ -1,14 +1,52 @@
 name: Build and publish provider review fixes v3
 
 on:
-  workflow_dispatch:
+  push:
+    branches:
+      - tmp/build-review-fix-provider-20260901
 
 permissions:
   contents: write
   pull-requests: write
 
+concurrency:
+  group: build-review-fix-provider-v3
+  cancel-in-progress: true
+
 jobs:
-  disabled:
+  build-publish:
     runs-on: ubuntu-24.04
     steps:
-      - run: echo 'publisher preparation in progress'
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          submodules: recursive
+      - uses: actions/setup-go@v6
+        with:
+          go-version: 1.26.7
+          cache: false
+      - name: Install eBPF toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang llvm libbpf-dev iproute2 patch
+      - name: Build, test, and publish ordinary source
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -o pipefail
+          bash .github/review-fix/build-provider-v2.sh 2>&1 | tee /tmp/provider-build.log
+      - name: Upload generated provider tree
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: provider-tree-v3
+          path: /tmp/ebpfinbound
+          include-hidden-files: true
+          retention-days: 2
+      - name: Upload build diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: provider-build-diagnostics-v3
+          path: /tmp/provider-build.log
+          retention-days: 2
