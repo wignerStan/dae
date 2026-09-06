@@ -1,0 +1,44 @@
+name: Repair eBPF inbound builder
+
+on:
+  push:
+    branches:
+      - tmp/build-ebpfinbound-schema-v9-20260906-v1
+
+permissions:
+  contents: write
+
+concurrency:
+  group: repair-ebpfinbound-builder
+  cancel-in-progress: false
+
+jobs:
+  repair:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: tmp/build-ebpfinbound-schema-v9-20260906-v1
+      - name: Repair generated source template
+        shell: bash
+        run: |
+          set -euxo pipefail
+          workflow=.github/workflows/zz-build-ebpfinbound-schema-v9.yml
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path('.github/workflows/zz-build-ebpfinbound-schema-v9.yml')
+          text = path.read_text()
+          old = r'''          \tqdisc, qdiscCreated, err := ensureClsact(link)'''
+          new = r'''          \t_, qdiscCreated, err := ensureClsact(link)'''
+          if old not in text:
+              raise SystemExit('unused qdisc builder marker not found')
+          path.write_text(text.replace(old, new, 1))
+          PY
+          git diff --check
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add "$workflow"
+          git commit -m "ci: fix generated TC attachment template"
+          git push origin HEAD:tmp/build-ebpfinbound-schema-v9-20260906-v1
