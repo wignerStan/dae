@@ -1,0 +1,48 @@
+name: Materialize eBPF inbound source
+
+on:
+  push:
+    branches:
+      - tmp/build-ebpfinbound-schema-v9-20260906-v1
+
+permissions:
+  contents: write
+
+jobs:
+  materialize:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: tmp/build-ebpfinbound-schema-v9-20260906-v1
+          fetch-depth: 0
+          submodules: recursive
+      - name: Extract and run the source-construction step
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m pip install --disable-pip-version-check pyyaml
+          python3 - <<'PY'
+          from pathlib import Path
+          import yaml
+
+          workflow = yaml.safe_load(Path('.github/workflows/zz-build-ebpfinbound-schema-v9.yml').read_text())
+          for step in workflow['jobs']['build']['steps']:
+              if step.get('name') == 'Build one clean source tree':
+                  Path('/tmp/materialize-ebpfinbound.sh').write_text(step['run'])
+                  break
+          else:
+              raise SystemExit('source-construction step not found')
+          PY
+          bash -euxo pipefail /tmp/materialize-ebpfinbound.sh
+      - name: Publish exact materialized tree for independent validation
+        shell: bash
+        run: |
+          set -euxo pipefail
+          cd /tmp/dae-ebpfinbound-final
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "tmp: materialize Schema-v9 eBPF inbound source"
+          git push origin HEAD:refs/heads/tmp/ebpfinbound-schema-v9-materialized --force
