@@ -56,9 +56,11 @@ type Metadata struct {
 
 // ListenerSet is owned by Runtime. Consumers may Accept and Read from these
 // sockets, but must not Close or duplicate them. Runtime.Close closes the set.
+// TCP listeners are concrete because BPF sockmap publication requires access
+// to their raw socket descriptors.
 type ListenerSet interface {
-	TCP4() net.Listener
-	TCP6() net.Listener
+	TCP4() *net.TCPListener
+	TCP6() *net.TCPListener
 	UDP() *net.UDPConn
 	Port() uint16
 }
