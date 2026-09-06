@@ -35,6 +35,7 @@ jobs:
         run: |
           set -o pipefail
           sed -i 's/patch -p2 /patch -p3 /' .github/review-fix/build-provider-v2.sh
+          sed -i '/patch -p3 --forward --batch/a sed -i "s/_, err := New/_, err = New/" runtime_integration_test.go' .github/review-fix/build-provider-v2.sh
           bash .github/review-fix/build-provider-v2.sh 2>&1 | tee /tmp/provider-build.log
       - name: Upload generated provider tree
         if: always()
