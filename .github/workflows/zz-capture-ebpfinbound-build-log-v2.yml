@@ -1,0 +1,38 @@
+name: Capture eBPF inbound failure v2
+
+on:
+  push:
+    branches:
+      - tmp/build-ebpfinbound-schema-v9-20260906-v1
+
+permissions:
+  actions: read
+  contents: write
+
+jobs:
+  capture:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: tmp/build-ebpfinbound-schema-v9-20260906-v1
+      - name: Capture exact failed run output
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -u
+          {
+            echo "diagnostic_run=$GITHUB_RUN_ID"
+            echo "source_run=34012126126"
+            gh run view 34012126126 --repo "$GITHUB_REPOSITORY" --json status,conclusion,jobs
+            echo
+            echo "--- failed log ---"
+            gh run view 34012126126 --repo "$GITHUB_REPOSITORY" --log-failed
+          } > .github/ebpfinbound-build-error-v2.log 2>&1
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add .github/ebpfinbound-build-error-v2.log
+          git commit -m "ci: record exact eBPF inbound failure v2"
+          git push origin HEAD:tmp/build-ebpfinbound-schema-v9-20260906-v1
