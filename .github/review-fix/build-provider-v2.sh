@@ -2,19 +2,21 @@
 set -euo pipefail
 
 BASE=5db27a0028d36e7847bd3796497df952337a20e2
-FINAL=fix/ebpfinbound-review-v2
+FINAL=refactor/ebpfinbound-schema-v9
+WORK=/tmp/ebpfinbound
 
-rm -rf /tmp/ebpfinbound /tmp/provider-tree
+rm -rf "$WORK" /tmp/provider-tree /tmp/control /tmp/provider-hardening.patch
 cat .github/review-fix/provider/part-* | base64 -d > /tmp/provider-source.tar.gz
 sha256sum /tmp/provider-source.tar.gz
 tar -tzf /tmp/provider-source.tar.gz >/dev/null
 mkdir -p /tmp/provider-tree
 tar -xzf /tmp/provider-source.tar.gz -C /tmp/provider-tree
-mv /tmp/provider-tree/ebpfinbound /tmp/ebpfinbound
-mkdir -p /tmp/ebpfinbound/bpf
-cp control/kern/tproxy.c /tmp/ebpfinbound/bpf/capture.c
-cp -a control/kern/headers /tmp/ebpfinbound/bpf/headers
-cp LICENSE /tmp/ebpfinbound/LICENSE
+mv /tmp/provider-tree/ebpfinbound "$WORK"
+mkdir -p "$WORK/bpf"
+cp control/kern/tproxy.c "$WORK/bpf/capture.c"
+cp control/kern/ebpf_sync_defs.h "$WORK/bpf/ebpf_sync_defs.h"
+cp -a control/kern/headers "$WORK/bpf/headers"
+cp LICENSE "$WORK/LICENSE"
 
 python3 - <<'PY'
 from pathlib import Path
@@ -96,46 +98,65 @@ text = text[:wan_start] + '#ifdef DAE_CAPTURE_ONLY\n' + wan_capture + '\n#else\n
 path.write_text(text)
 PY
 
-cd /tmp/ebpfinbound
+cd "$WORK"
+go mod tidy
+sed -i 's/ -type dae_param//' generate.go
+sed -i '/^[[:space:]]*"net"$/d' preflight_linux.go
+go generate ./...
+go mod tidy
+find . -name '*.go' -print0 | xargs -0 gofmt -w
+rm -rf bpf/headers dae-ebpf-tool
+
+base64 -d "$GITHUB_WORKSPACE/.github/review-fix/provider-hardening-v3.patch.gz.b64" | gzip -d > /tmp/provider-hardening.patch
+patch -p2 --forward --batch < /tmp/provider-hardening.patch
+rm -rf bpf/headers dae-ebpf-tool
+rm -f /tmp/control
+ln -s "$GITHUB_WORKSPACE/control" /tmp/control
+
 go generate ./...
 go mod tidy
 find . -name '*.go' -print0 | xargs -0 gofmt -w
 go test -race ./...
 go vet ./...
+go test -tags dae_stub_ebpf ./...
+stub_files=$(go list -tags dae_stub_ebpf -f '{{join .GoFiles " "}}' .)
+if grep -Eq 'bpf_bpf(el|eb)\.go' <<<"$stub_files"; then
+  echo 'dae_stub_ebpf unexpectedly includes generated BPF objects' >&2
+  exit 1
+fi
 go build ./cmd/dae-ebpf-tool
 
 deps=$(go list -deps ./...)
-if grep -E 'github.com/(daeuniverse|wignerStan)/dae/(control|config|common|component|cmd|pkg)|github.com/daeuniverse/outbound|github.com/olicesx/quic-go|github.com/quic-go/qpack|github.com/sirupsen/logrus' <<<"$deps"; then
+if grep -E 'github.com/(daeuniverse|wignerStan)/dae/(control|config|common|component|cmd|pkg)|github.com/daeuniverse/outbound|github.com/(olicesx|quic-go)/quic-go|github.com/quic-go/qpack|github.com/sirupsen/logrus' <<<"$deps"; then
   echo 'forbidden daemon, policy, outbound, QUIC, qpack, or logging dependency leaked into provider' >&2
   exit 1
 fi
+! grep -R -E 'OpenGeneration|CloneGeneration|CommitGeneration' --include='*.go' .
 for asset in go.sum bpf_bpfel.go bpf_bpfeb.go bpf_bpfel.o bpf_bpfeb.o; do
   test -s "$asset"
 done
 
-sudo mkdir -p /sys/fs/bpf /run/netns
-mountpoint -q /sys/fs/bpf || sudo mount -t bpf bpf /sys/fs/bpf
-sudo --preserve-env=PATH env HOME="$HOME" go test -tags=integration -run 'TestPrivileged' -count=1 -v .
+sudo mkdir -p /run/netns
+sudo --preserve-env=PATH env HOME="$HOME" go test -tags=integration -run '^TestPrivileged' -count=1 -v .
 ! ip link show daecap0
 ! ip link show daecap1
-! ip netns list | grep -q '^dae-ebpfinbound'
+test ! -e /run/netns/dae-ebpfinbound
 
 cd "$GITHUB_WORKSPACE"
 git checkout -B publish "$BASE"
 rm -rf ebpfinbound
-cp -a /tmp/ebpfinbound ebpfinbound
+cp -a "$WORK" ebpfinbound
 rm -f ebpfinbound/dae-ebpf-tool
 mkdir -p .github/workflows
 cat > .github/workflows/ebpfinbound.yml <<'YAML'
-name: eBPF inbound provider
+name: eBPF inbound
 
 on:
-  pull_request:
+  push:
     paths:
       - 'ebpfinbound/**'
       - '.github/workflows/ebpfinbound.yml'
-  push:
-    branches: [main]
+  pull_request:
     paths:
       - 'ebpfinbound/**'
       - '.github/workflows/ebpfinbound.yml'
@@ -144,65 +165,99 @@ permissions:
   contents: read
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ebpfinbound-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  validate:
+  module:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v6
+        with:
+          submodules: recursive
       - uses: actions/setup-go@v6
         with:
-          go-version: 1.26.7
-      - name: Test, race and vet
+          go-version: '1.26.x'
+          cache-dependency-path: ebpfinbound/go.sum
+      - name: Install eBPF generation tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang llvm libbpf-dev iproute2
+      - name: Unit, race, vet, and stub boundary
         working-directory: ebpfinbound
         run: |
+          set -euxo pipefail
           go test -race ./...
           go vet ./...
-          go build ./cmd/dae-ebpf-tool
-      - name: Verify standalone dependency boundary
+          go test -tags dae_stub_ebpf ./...
+          stub_files=$(go list -tags dae_stub_ebpf -f '{{join .GoFiles " "}}' .)
+          if grep -Eq 'bpf_bpf(el|eb)\.go' <<<"$stub_files"; then
+            echo 'dae_stub_ebpf unexpectedly includes generated BPF objects' >&2
+            exit 1
+          fi
+      - name: Dependency and API boundary
         working-directory: ebpfinbound
         run: |
+          set -euxo pipefail
           deps=$(go list -deps ./...)
-          ! grep -E 'github.com/(daeuniverse|wignerStan)/dae/(control|config|common|component|cmd|pkg)|github.com/daeuniverse/outbound|github.com/olicesx/quic-go|github.com/quic-go/qpack|github.com/sirupsen/logrus' <<<"$deps"
-      - name: Verify committed BPF assets
+          if grep -E 'github.com/(daeuniverse|wignerStan)/dae/(cmd|common|component|config|control|pkg)|github.com/daeuniverse/outbound|github.com/(olicesx|quic-go)/quic-go|github.com/quic-go/qpack' <<<"$deps"; then
+            echo 'daemon, policy, outbound, QUIC, or qpack dependency leaked into ebpfinbound' >&2
+            exit 1
+          fi
+          ! grep -R -E 'OpenGeneration|CloneGeneration|CommitGeneration' --include='*.go' .
+          go build ./cmd/dae-ebpf-tool
+      - name: Generated BPF freshness
         working-directory: ebpfinbound
         run: |
-          test -s go.sum
-          test -s bpf_bpfel.go
-          test -s bpf_bpfeb.go
-          test -s bpf_bpfel.o
-          test -s bpf_bpfeb.o
+          set -euxo pipefail
+          sha256sum bpf_bpfel.go bpf_bpfel.o bpf_bpfeb.go bpf_bpfeb.o > /tmp/ebpfinbound-bpf.sha256
+          go generate ./...
+          sha256sum -c /tmp/ebpfinbound-bpf.sha256
+          git diff --exit-code -- bpf_bpfel.go bpf_bpfel.o bpf_bpfeb.go bpf_bpfeb.o
+      - name: Upload regenerated BPF assets
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: regenerated-bpf-assets
+          path: |
+            ebpfinbound/bpf_bpfel.go
+            ebpfinbound/bpf_bpfel.o
+            ebpfinbound/bpf_bpfeb.go
+            ebpfinbound/bpf_bpfeb.o
+          retention-days: 2
 
   privileged:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v6
+        with:
+          submodules: recursive
       - uses: actions/setup-go@v6
         with:
-          go-version: 1.26.7
+          go-version: '1.26.x'
+          cache-dependency-path: ebpfinbound/go.sum
       - name: Install runtime tools
-        run: sudo apt-get update && sudo apt-get install -y iproute2
-      - name: Run privileged lifecycle tests
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y iproute2
+          sudo mkdir -p /run/netns
+      - name: Privileged lifecycle and traffic
         working-directory: ebpfinbound
         run: |
-          sudo mkdir -p /sys/fs/bpf /run/netns
-          mountpoint -q /sys/fs/bpf || sudo mount -t bpf bpf /sys/fs/bpf
-          sudo --preserve-env=PATH env HOME="$HOME" go test -tags=integration -run 'TestPrivileged' -count=1 -v .
+          set -euxo pipefail
+          sudo --preserve-env=PATH env HOME="$HOME" go test -tags=integration -run '^TestPrivileged' -count=1 -v .
           ! ip link show daecap0
-          ! ip link show daecap1
-          ! ip netns list | grep -q '^dae-ebpfinbound'
+          test ! -e /run/netns/dae-ebpfinbound
 YAML
 
 git add -f ebpfinbound .github/workflows/ebpfinbound.yml
 git diff --cached --check
 git config user.name Jacob
 git config user.email 240170694+wignerStan@users.noreply.github.com
-git commit -m 'refactor(ebpfinbound): harden one-shot capture runtime'
+git commit -m 'refactor(ebpfinbound): add standalone capture owner'
 git push --force origin HEAD:refs/heads/$FINAL
 if gh pr view "$FINAL" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-  gh pr edit "$FINAL" --repo "$GITHUB_REPOSITORY" --base main --title 'refactor(ebpfinbound): harden one-shot capture runtime'
+  gh pr edit "$FINAL" --repo "$GITHUB_REPOSITORY" --base main --title 'refactor(ebpfinbound): add standalone capture owner'
 else
-  gh pr create --repo "$GITHUB_REPOSITORY" --draft --base main --head "$FINAL" --title 'refactor(ebpfinbound): harden one-shot capture runtime' --body 'Replaces the unsafe cloned-listener generation API with a one-shot stable capture runtime. Adds operation-versus-close gating, ownership-safe netns/TC cleanup, conditional sysctl leases, process identity validation, capture-only BPF pruning, committed generated assets, and privileged lifecycle/traffic tests. This is the provider half of the linked sing-box hardening.'
+  gh pr create --repo "$GITHUB_REPOSITORY" --draft --base main --head "$FINAL" --title 'refactor(ebpfinbound): add standalone capture owner' --body 'Adds a standalone one-shot transparent eBPF capture module classified under FCIS Schema v9 as one axisless effect_tool(application_support) operation. The provider owns BPF/TC/cgroup/listener/netns/sysctl lifecycle and exposes factual flow metadata only; DNS, sniffing, routing, and outbounds stay with the embedding engine. This change removes listener generations, gates operations against Close, makes namespace switching thread-safe, preserves failed sysctl recovery evidence, fails startup on incomplete IPv6 readiness, commits generated assets, and validates real TCP/UDP interception plus foreign-resource preservation.'
 fi
