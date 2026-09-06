@@ -1,0 +1,112 @@
+--- provider-v5/bpf_linux.go	2026-09-06 04:20:06.000000000 +0000
++++ provider-v6/bpf_linux.go	2026-09-06 04:22:31.570869089 +0000
+@@ -48,6 +48,62 @@
+ 	"tproxy_wan_cg_sendmsg6":     {},
+ }
+ 
++type captureBPFObjects struct {
++	ListenSocketMap   *ebpf.Map `ebpf:"listen_socket_map"`
++	ConnStateMap      *ebpf.Map `ebpf:"conn_state_map"`
++	RoutingHandoffMap *ebpf.Map `ebpf:"routing_handoff_map"`
++
++	TproxyLanEgressL2      *ebpf.Program `ebpf:"tproxy_lan_egress_l2"`
++	TproxyLanEgressL3      *ebpf.Program `ebpf:"tproxy_lan_egress_l3"`
++	TproxyLanIngressL2     *ebpf.Program `ebpf:"tproxy_lan_ingress_l2"`
++	TproxyLanIngressL3     *ebpf.Program `ebpf:"tproxy_lan_ingress_l3"`
++	TproxyWanIngressL2     *ebpf.Program `ebpf:"tproxy_wan_ingress_l2"`
++	TproxyWanIngressL3     *ebpf.Program `ebpf:"tproxy_wan_ingress_l3"`
++	TproxyWanEgressL2      *ebpf.Program `ebpf:"tproxy_wan_egress_l2"`
++	TproxyWanEgressL3      *ebpf.Program `ebpf:"tproxy_wan_egress_l3"`
++	TproxyDae0peerIngress  *ebpf.Program `ebpf:"tproxy_dae0peer_ingress"`
++	TproxyDae0Ingress      *ebpf.Program `ebpf:"tproxy_dae0_ingress"`
++	TproxyWanCgSockCreate  *ebpf.Program `ebpf:"tproxy_wan_cg_sock_create"`
++	TproxyWanCgSockRelease *ebpf.Program `ebpf:"tproxy_wan_cg_sock_release"`
++	TproxyWanCgConnect4    *ebpf.Program `ebpf:"tproxy_wan_cg_connect4"`
++	TproxyWanCgConnect6    *ebpf.Program `ebpf:"tproxy_wan_cg_connect6"`
++	TproxyWanCgSendmsg4    *ebpf.Program `ebpf:"tproxy_wan_cg_sendmsg4"`
++	TproxyWanCgSendmsg6    *ebpf.Program `ebpf:"tproxy_wan_cg_sendmsg6"`
++}
++
++func (o *captureBPFObjects) Close() error {
++	if o == nil {
++		return nil
++	}
++	var errs []error
++	for _, item := range []*ebpf.Map{
++		o.ListenSocketMap, o.ConnStateMap, o.RoutingHandoffMap,
++	} {
++		if item != nil {
++			if err := item.Close(); err != nil {
++				errs = append(errs, err)
++			}
++		}
++	}
++	for _, item := range []*ebpf.Program{
++		o.TproxyLanEgressL2, o.TproxyLanEgressL3,
++		o.TproxyLanIngressL2, o.TproxyLanIngressL3,
++		o.TproxyWanIngressL2, o.TproxyWanIngressL3,
++		o.TproxyWanEgressL2, o.TproxyWanEgressL3,
++		o.TproxyDae0peerIngress, o.TproxyDae0Ingress,
++		o.TproxyWanCgSockCreate, o.TproxyWanCgSockRelease,
++		o.TproxyWanCgConnect4, o.TproxyWanCgConnect6,
++		o.TproxyWanCgSendmsg4, o.TproxyWanCgSendmsg6,
++	} {
++		if item != nil {
++			if err := item.Close(); err != nil {
++				errs = append(errs, err)
++			}
++		}
++	}
++	return errors.Join(errs...)
++}
++
+ var captureMapNames = map[string]struct{}{
+ 	"listen_socket_map":            {},
+ 	"redirect_track":               {},
+@@ -62,7 +118,7 @@
+ 	"conntrack_args_map":           {},
+ }
+ 
+-func loadCaptureBPF(ns *captureNetNS, config CaptureConfig) (*bpfObjects, error) {
++func loadCaptureBPF(ns *captureNetNS, config CaptureConfig) (*captureBPFObjects, error) {
+ 	if ns == nil || ns.hostLink == nil || ns.peerLink == nil {
+ 		return nil, errors.New("capture network namespace is not initialized")
+ 	}
+@@ -117,7 +173,7 @@
+ 		}
+ 	}
+ 
+-	objects := new(bpfObjects)
++	objects := new(captureBPFObjects)
+ 	if err := spec.LoadAndAssign(objects, &ebpf.CollectionOptions{}); err != nil {
+ 		_ = objects.Close()
+ 		return nil, err
+@@ -186,7 +242,7 @@
+ 	return key
+ }
+ 
+-func lookupFlowMetadata(ctx context.Context, objects *bpfObjects, flow Flow) (Metadata, bool, error) {
++func lookupFlowMetadata(ctx context.Context, objects *captureBPFObjects, flow Flow) (Metadata, bool, error) {
+ 	if objects == nil || objects.ConnStateMap == nil {
+ 		return Metadata{}, false, ErrClosed
+ 	}
+@@ -221,7 +277,7 @@
+ 	return Metadata{}, false, lastErr
+ }
+ 
+-func lookupMetadataOnce(objects *bpfObjects, key *bpfTuplesKey) (Metadata, bool, error) {
++func lookupMetadataOnce(objects *captureBPFObjects, key *bpfTuplesKey) (Metadata, bool, error) {
+ 	var state bpfConnState
+ 	if err := objects.ConnStateMap.Lookup(key, &state); err == nil {
+ 		if state.Meta.Data.HasRouting != 0 {
+--- provider-v5/runtime_linux.go	2026-09-06 04:20:06.000000000 +0000
++++ provider-v6/runtime_linux.go	2026-09-06 04:22:19.550216903 +0000
+@@ -31,7 +31,7 @@
+ 	listeners       *listenerSet
+ 	lockFile        *os.File
+ 	netns           *captureNetNS
+-	bpf             *bpfObjects
++	bpf             *captureBPFObjects
+ 	detachFunctions []func() error
+ 	publishedFiles  []*os.File
+ 	attachedLinks   int
