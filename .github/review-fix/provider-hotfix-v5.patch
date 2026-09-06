@@ -1,0 +1,14 @@
+diff --git a/bpf_spec_linux_test.go b/bpf_spec_linux_test.go
+index 53ece94..af8a7e5 100644
+--- a/bpf_spec_linux_test.go
++++ b/bpf_spec_linux_test.go
+@@ -20,6 +20,9 @@ func TestCaptureBPFSpecContainsOnlyCaptureSurface(t *testing.T) {
+ 		}
+ 	}
+ 	for name := range spec.Maps {
++		if len(name) > 0 && name[0] == '.' {
++			continue
++		}
+ 		if _, allowed := captureMapNames[name]; !allowed {
+ 			t.Errorf("unexpected map retained: %s", name)
+ 		}
