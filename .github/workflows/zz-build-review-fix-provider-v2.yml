@@ -34,6 +34,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -o pipefail
+          sed -i 's/patch -p2 /patch -p3 /' .github/review-fix/build-provider-v2.sh
           bash .github/review-fix/build-provider-v2.sh 2>&1 | tee /tmp/provider-build.log
       - name: Upload generated provider tree
         if: always()
