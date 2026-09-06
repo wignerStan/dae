@@ -1,0 +1,20 @@
+--- provider-v6/attach_linux.go	2026-09-06 04:20:06.000000000 +0000
++++ provider-v7/attach_linux.go	2026-09-06 04:24:28.051611533 +0000
+@@ -196,7 +196,7 @@
+ 			netlink.HANDLE_MIN_INGRESS,
+ 			captureInternalTCMajor,
+ 			0x001,
+-			0,
++			1,
+ 			"dae_cap_peer",
+ 			r.bpf.TproxyDae0peerIngress,
+ 		)
+@@ -226,7 +226,7 @@
+ 		netlink.HANDLE_MIN_INGRESS,
+ 		captureInternalTCMajor,
+ 		0x002,
+-		0,
++		1,
+ 		"dae_cap_host",
+ 		r.bpf.TproxyDae0Ingress,
+ 	)
