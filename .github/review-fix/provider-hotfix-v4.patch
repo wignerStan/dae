@@ -1,0 +1,27 @@
+diff --git a/bpf_linux.go b/bpf_linux.go
+index 457f9ae..944cbce 100644
+--- a/bpf_linux.go
++++ b/bpf_linux.go
+@@ -139,6 +139,9 @@ func pruneCaptureSpec(spec *ebpf.CollectionSpec) error {
+ 		}
+ 	}
+ 	for name := range spec.Maps {
++		if len(name) > 0 && name[0] == '.' {
++			continue
++		}
+ 		if _, keep := captureMapNames[name]; !keep {
+ 			delete(spec.Maps, name)
+ 		}
+diff --git a/runtime_integration_test.go b/runtime_integration_test.go
+index 63d94cf..aeb25d4 100644
+--- a/runtime_integration_test.go
++++ b/runtime_integration_test.go
+@@ -82,7 +82,7 @@ func TestPrivilegedRuntimeRefusesForeignResources(t *testing.T) {
+ 	}
+ 	t.Cleanup(func() { cleanupTestLink(t, captureHostLink) })
+ 
+-	_, err := New(context.Background(), Options{Capture: CaptureConfig{
++	_, err = New(context.Background(), Options{Capture: CaptureConfig{
+ 		WANInterfaces:       []string{captureHostLink},
+ 		AutoConfigureKernel: true,
+ 	}})
