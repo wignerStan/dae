@@ -79,7 +79,8 @@ jobs:
           capture_patch = r'''python3 - <<'INNER_PY'
           from pathlib import Path
 
-          path = Path('/tmp/dae-ebpfinbound-final/control/kern/tproxy.c')
+          source = Path('/tmp/dae-ebpfinbound-final')
+          path = source / 'control/kern/tproxy.c'
           text = path.read_text()
           function_open = """static __noinline bool
           wan_outbound_is_alive(struct __sk_buff *skb, __u8 outbound, __u8 l4proto,
@@ -110,6 +111,39 @@ jobs:
           if text.count(function_close) != 1:
               raise SystemExit('outbound connectivity helper end not found')
           path.write_text(text.replace(function_close, capture_close, 1))
+
+          (source / 'ebpfinbound/cgroup_stub.go').write_text('''//go:build linux && dae_stub_ebpf
+
+// SPDX-License-Identifier: AGPL-3.0-only
+
+package ebpfinbound
+
+import (
+    "bufio"
+    "errors"
+    "os"
+    "strings"
+)
+
+func detectCgroupPath() (string, error) {
+    file, err := os.Open("/proc/mounts")
+    if err != nil {
+        return "", err
+    }
+    defer file.Close()
+    scanner := bufio.NewScanner(file)
+    for scanner.Scan() {
+        fields := strings.Fields(scanner.Text())
+        if len(fields) >= 3 && fields[2] == "cgroup2" {
+            return strings.NewReplacer(`\\040`, " ", `\\011`, "\\t", `\\134`, `\\`).Replace(fields[1]), nil
+        }
+    }
+    if err := scanner.Err(); err != nil {
+        return "", err
+    }
+    return "", errors.New("cgroup v2 mount not found")
+}
+''')
           INNER_PY'''
 
           script = (
