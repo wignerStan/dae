@@ -75,7 +75,35 @@ jobs:
 
           if len(blocks) != 6:
               raise SystemExit(f'unexpected builder run-block count: {len(blocks)}')
-          script = '#!/usr/bin/env bash\nset -euo pipefail\n\n' + '\n\n'.join(blocks) + '\n'
+
+          capture_patch = r'''python3 - <<'INNER_PY'
+          from pathlib import Path
+
+          path = Path('/tmp/dae-ebpfinbound-final/control/kern/tproxy.c')
+          text = path.read_text()
+          old = """\tif (!wan_outbound_is_alive(skb, outbound, pkt->l4proto,
+          \t\t\t\t   pkt->tuples.five.dport))
+          \t\tgoto block;"""
+          new = """#ifndef DAE_CAPTURE_ONLY
+          \tif (!wan_outbound_is_alive(skb, outbound, pkt->l4proto,
+          \t\t\t\t   pkt->tuples.five.dport))
+          \t\tgoto block;
+          #endif"""
+          count = text.count(old)
+          if count != 1:
+              raise SystemExit(f'unexpected outbound connectivity guard count: {count}')
+          path.write_text(text.replace(old, new, 1))
+          INNER_PY'''
+
+          script = (
+              '#!/usr/bin/env bash\nset -euo pipefail\n\n'
+              + blocks[0]
+              + '\n\n'
+              + capture_patch
+              + '\n\n'
+              + '\n\n'.join(blocks[1:])
+              + '\n'
+          )
           path = Path('/tmp/run-ebpfinbound-builder.sh')
           path.write_text(script)
           path.chmod(0o700)
