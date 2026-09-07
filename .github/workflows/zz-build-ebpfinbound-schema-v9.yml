@@ -81,18 +81,35 @@ jobs:
 
           path = Path('/tmp/dae-ebpfinbound-final/control/kern/tproxy.c')
           text = path.read_text()
-          old = """\tif (!wan_outbound_is_alive(skb, outbound, pkt->l4proto,
-          \t\t\t\t   pkt->tuples.five.dport))
-          \t\tgoto block;"""
-          new = """#ifndef DAE_CAPTURE_ONLY
-          \tif (!wan_outbound_is_alive(skb, outbound, pkt->l4proto,
-          \t\t\t\t   pkt->tuples.five.dport))
-          \t\tgoto block;
-          #endif"""
-          count = text.count(old)
-          if count != 1:
-              raise SystemExit(f'unexpected outbound connectivity guard count: {count}')
-          path.write_text(text.replace(old, new, 1))
+          function_open = """static __noinline bool
+          wan_outbound_is_alive(struct __sk_buff *skb, __u8 outbound, __u8 l4proto,
+          \t\t      __be16 dport)
+          {"""
+          capture_open = function_open + """
+          #ifdef DAE_CAPTURE_ONLY
+          \t(void)skb;
+          \t(void)outbound;
+          \t(void)l4proto;
+          \t(void)dport;
+          \treturn true;
+          #else"""
+          if text.count(function_open) != 1:
+              raise SystemExit('unexpected outbound connectivity helper count')
+          text = text.replace(function_open, capture_open, 1)
+          function_close = """\treturn true;
+          }
+
+          static __noinline int
+          do_tproxy_wan_egress_tcp"""
+          capture_close = """\treturn true;
+          #endif
+          }
+
+          static __noinline int
+          do_tproxy_wan_egress_tcp"""
+          if text.count(function_close) != 1:
+              raise SystemExit('outbound connectivity helper end not found')
+          path.write_text(text.replace(function_close, capture_close, 1))
           INNER_PY'''
 
           script = (
