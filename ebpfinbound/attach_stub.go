@@ -10,4 +10,4 @@ func (r *captureRuntime) attachDatapath() ([]ownedTCAttachment, []func() error, 
 	return nil, nil, stubBPFError()
 }
 func attachmentRecords([]ownedTCAttachment) []ownedAttachmentRecord { return nil }
-func cleanupStaleAttachments([]ownedAttachmentRecord) error          { return nil }
+func cleanupStaleAttachments([]ownedAttachmentRecord) error         { return nil }

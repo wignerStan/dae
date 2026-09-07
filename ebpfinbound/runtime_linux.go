@@ -61,10 +61,10 @@ type captureRuntime struct {
 	processMetadataEnabled bool
 	listeners              *listenerSet
 	ownership              *ownershipLease
-	netns                   *captureNetNS
-	bpf                     *captureObjects
-	detachFunctions         []func() error
-	publishedFiles          []*os.File
+	netns                  *captureNetNS
+	bpf                    *captureObjects
+	detachFunctions        []func() error
+	publishedFiles         []*os.File
 
 	lifecycle   context.Context
 	cancel      context.CancelFunc

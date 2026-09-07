@@ -10,10 +10,10 @@ import (
 )
 
 type Options struct {
-	Capture CaptureConfig
-	Logger *slog.Logger
+	Capture   CaptureConfig
+	Logger    *slog.Logger
 	LogOutput io.Writer
-	LogLevel string
+	LogLevel  string
 }
 
 func (o Options) logger() (*slog.Logger, error) {

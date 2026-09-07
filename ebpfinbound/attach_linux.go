@@ -358,7 +358,7 @@ func assertTCSlotFree(link netlink.Link, candidate *netlink.BpfFilter) error {
 // priority when a filter is added with priority zero, while the parent and
 // handle remain the stable identity selected by this runtime. Callers still
 // verify the BPF name and program ID before treating the result as owned.
-func findTCFilter(link netlink.Link, parent, handle uint32) (netlink.Filter, error) {
+func findTCFilter(link netlink.Link, parent, handle uint32, _ ...uint16) (netlink.Filter, error) {
 	filters, err := netlink.FilterList(link, parent)
 	if err != nil {
 		return nil, err
