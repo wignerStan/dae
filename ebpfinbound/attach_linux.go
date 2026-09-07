@@ -304,7 +304,7 @@ func attachSingleFilter(link netlink.Link, inNetNS bool, filter *netlink.BpfFilt
 		_ = cleanupQdisc()
 		return ownedTCAttachment{}, nil, fmt.Errorf("add capture TC filter %s: %w", filter.Name, err)
 	}
-	actual, err := findTCFilter(link, filter.Attrs().Parent, filter.Attrs().Handle, filter.Attrs().Priority)
+	actual, err := findTCFilter(link, filter.Attrs().Parent, filter.Attrs().Handle)
 	if err != nil {
 		_ = netlink.FilterDel(filter)
 		_ = cleanupQdisc()
@@ -354,17 +354,27 @@ func assertTCSlotFree(link netlink.Link, candidate *netlink.BpfFilter) error {
 	return nil
 }
 
-func findTCFilter(link netlink.Link, parent, handle uint32, priority uint16) (netlink.Filter, error) {
+// findTCFilter resolves one durable TC slot. Linux may normalize or allocate a
+// priority when a filter is added with priority zero, while the parent and
+// handle remain the stable identity selected by this runtime. Callers still
+// verify the BPF name and program ID before treating the result as owned.
+func findTCFilter(link netlink.Link, parent, handle uint32) (netlink.Filter, error) {
 	filters, err := netlink.FilterList(link, parent)
 	if err != nil {
 		return nil, err
 	}
+	observed := make([]string, 0, len(filters))
 	for _, filter := range filters {
-		if filter != nil && filter.Attrs() != nil && filter.Attrs().Handle == handle && filter.Attrs().Priority == priority {
+		if filter == nil || filter.Attrs() == nil {
+			continue
+		}
+		attrs := filter.Attrs()
+		observed = append(observed, fmt.Sprintf("%s(handle=%#x priority=%d)", filter.Type(), attrs.Handle, attrs.Priority))
+		if attrs.Handle == handle {
 			return filter, nil
 		}
 	}
-	return nil, errors.New("newly attached TC filter was not found")
+	return nil, fmt.Errorf("newly attached TC filter was not found on %s parent=%#x handle=%#x; observed: %s", link.Attrs().Name, parent, handle, strings.Join(observed, ", "))
 }
 
 func deleteOwnedFilter(record ownedAttachmentRecord) error {
@@ -376,7 +386,7 @@ func deleteOwnedFilter(record ownedAttachmentRecord) error {
 			}
 			return err
 		}
-		filter, err := findTCFilter(link, record.Parent, record.Handle, record.Priority)
+		filter, err := findTCFilter(link, record.Parent, record.Handle)
 		if err != nil {
 			if strings.Contains(err.Error(), "not found") {
 				return nil
