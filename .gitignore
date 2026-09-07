@@ -6,6 +6,10 @@ bpf*_bpfeb*.go
 bpf*_bpfel*.go
 bpf*_*_bpfeb*.go
 bpf*_*_bpfel*.go
+!ebpfinbound/bpf_bpfel.go
+!ebpfinbound/bpf_bpfeb.go
+!ebpfinbound/bpf_bpfel.o
+!ebpfinbound/bpf_bpfeb.o
 dae
 outline.json
 go-mod/
