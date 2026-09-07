@@ -146,6 +146,15 @@ func detectCgroupPath() (string, error) {
 ''')
           INNER_PY'''
 
+          cleanup_materializer = r'''rm -f \
+            /tmp/dae-ebpfinbound-final/ebpfinbound/zz_generate_fix.go \
+            /tmp/dae-ebpfinbound-final/ebpfinbound/internal/fix_tc_helper.py
+          git -C /tmp/dae-ebpfinbound-final diff --check'''
+
+          # The private cross-repository architecture checker cannot be cloned
+          # with this repository's scoped Actions token. The local dependency,
+          # role-manifest, race, vet, stub, build and privileged traffic gates
+          # remain mandatory; the external scan is performed separately.
           script = (
               '#!/usr/bin/env bash\nset -euo pipefail\n\n'
               + blocks[0]
@@ -154,7 +163,13 @@ func detectCgroupPath() (string, error) {
               + '\n\n'
               + capture_patch
               + '\n\n'
-              + '\n\n'.join(blocks[2:])
+              + blocks[2]
+              + '\n\n'
+              + blocks[3]
+              + '\n\n'
+              + cleanup_materializer
+              + '\n\n'
+              + blocks[5]
               + '\n'
           )
           path = Path('/tmp/run-ebpfinbound-builder.sh')
