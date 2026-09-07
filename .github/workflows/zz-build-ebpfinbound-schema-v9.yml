@@ -99,9 +99,11 @@ jobs:
               '#!/usr/bin/env bash\nset -euo pipefail\n\n'
               + blocks[0]
               + '\n\n'
+              + blocks[1]
+              + '\n\n'
               + capture_patch
               + '\n\n'
-              + '\n\n'.join(blocks[1:])
+              + '\n\n'.join(blocks[2:])
               + '\n'
           )
           path = Path('/tmp/run-ebpfinbound-builder.sh')
