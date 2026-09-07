@@ -20,23 +20,16 @@ with tempfile.TemporaryDirectory(prefix="dae-ebpfinbound-generate-") as temporar
     shutil.copytree(source, kern, symlinks=True)
     tproxy = kern / "tproxy.c"
     text = tproxy.read_text()
-    signature = """static __noinline __s64 route(const __u32 *flag, const void *l4hdr,
-\t\t\t      const __be32 *saddr, const __be32 *daddr,
-\t\t\t      const __be32 *mac)
-{"""
-    replacement = signature + """
-#ifdef DAE_CAPTURE_ONLY
-\t/* Routing and DNS policy are owned by the embedding userspace engine. */
-\treturn (__s64)OUTBOUND_CONTROL_PLANE_ROUTING;
-#endif"""
-    if signature not in text:
-        raise SystemExit("route function marker not found in dae BPF source")
-    tproxy.write_text(text.replace(signature, replacement, 1))
+    if "Routing policy is owned by the embedding userspace engine." not in text:
+        raise SystemExit("capture-only route seam missing from canonical dae BPF source")
+    if "DAE_CAPTURE_ONLY" not in text or "wan_outbound_is_alive" not in text:
+        raise SystemExit("capture-only connectivity seam missing from canonical dae BPF source")
 
     command = [
         "go", "run", "-mod=mod", "github.com/cilium/ebpf/cmd/bpf2go@v0.20.0",
         "-cc", os.environ.get("BPF_CLANG", "clang"),
         "-no-strip",
+        "-no-global-types",
         "-cflags", "-DMAX_MATCH_SET_LEN=1024 -DDAE_CAPTURE_ONLY=1 -O2 -Wall -Werror",
         "-target", "bpfel,bpfeb",
         "-type", "dae_param",
