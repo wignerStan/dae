@@ -9,7 +9,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"runtime"
 	"sort"
 	"strings"
 
@@ -521,13 +520,6 @@ func deleteOwnedQdisc(record ownedAttachmentRecord) error {
 }
 
 func withNamedNetNS(name string, function func() error) (err error) {
-	runtime.LockOSThread()
-	defer runtime.UnlockOSThread()
-	host, err := netns.Get()
-	if err != nil {
-		return err
-	}
-	defer host.Close()
 	target, err := netns.GetFromName(name)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
@@ -536,11 +528,7 @@ func withNamedNetNS(name string, function func() error) (err error) {
 		return err
 	}
 	defer target.Close()
-	if err := netns.Set(target); err != nil {
-		return err
-	}
-	defer func() { err = errors.Join(err, netns.Set(host)) }()
-	return function()
+	return withNetNSHandle(target, function)
 }
 
 func interfaceFiltersEmpty(link netlink.Link) (bool, error) {
