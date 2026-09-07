@@ -85,7 +85,7 @@ func (s *listenerSet) close() error {
 	return s.closeErr
 }
 
-func openListenerSet(ctx context.Context, port uint16, logger interface{ Warn(string, ...any) }) (*listenerSet, error) {
+func openListenerSet(ctx context.Context, port uint16, _ interface{ Warn(string, ...any) }) (*listenerSet, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -127,15 +127,9 @@ func openListenerSet(ctx context.Context, port uint16, logger interface{ Warn(st
 
 	packetConn, err := udpConfig.ListenPacket(ctx, "udp6", net.JoinHostPort("::", portString))
 	if err != nil {
-		if logger != nil {
-			logger.Warn("dual-stack UDP listener unavailable; falling back to IPv4", "error", err)
-		}
-		packetConn, err = tcpConfig.ListenPacket(ctx, "udp4", net.JoinHostPort("0.0.0.0", portString))
-		if err != nil {
-			_ = tcp4.Close()
-			_ = tcp6.Close()
-			return nil, fmt.Errorf("listen UDP: %w", err)
-		}
+		_ = tcp4.Close()
+		_ = tcp6.Close()
+		return nil, fmt.Errorf("listen dual-stack UDP: %w", err)
 	}
 	udp, ok := packetConn.(*net.UDPConn)
 	if !ok {

@@ -5,6 +5,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -21,10 +22,17 @@ func main() {
 	}
 	var err error
 	switch os.Args[1] {
+	case "help", "-h", "--help":
+		usage()
+		return
 	case "doctor":
 		err = doctor(os.Args[2:])
 	case "cleanup-stale":
-		err = ebpfinbound.CleanupStale(context.Background())
+		if len(os.Args) != 2 {
+			err = errors.New("cleanup-stale does not accept arguments")
+		} else {
+			err = ebpfinbound.CleanupStale(context.Background())
+		}
 	default:
 		usage()
 		err = fmt.Errorf("unknown command %q", os.Args[1])
@@ -53,6 +61,9 @@ func doctor(arguments []string) error {
 	set.BoolVar(&requireProcess, "require-process-metadata", false, "require cgroup process metadata hooks")
 	if err := set.Parse(arguments); err != nil {
 		return err
+	}
+	if port > uint(^uint16(0)) {
+		return fmt.Errorf("port %d is outside the valid range 0-65535", port)
 	}
 	markValue, err := strconv.ParseUint(mark, 0, 32)
 	if err != nil {

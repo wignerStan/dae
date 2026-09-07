@@ -62,8 +62,7 @@ func newCaptureNetNS(ctx context.Context, log *slog.Logger, owner *ownershipLeas
 		return owner.SetSysctls(mutations)
 	})
 	if err := ns.setup(ctx); err != nil {
-		_ = ns.Close()
-		return nil, err
+		return ns, err
 	}
 	return ns, nil
 }
@@ -329,5 +328,6 @@ func deleteOwnedLink(name, token string) error {
 	return nil
 }
 func isMissingNetlinkError(err error) bool {
-	return err == nil || errors.Is(err, unix.ENOENT) || errors.Is(err, unix.ENODEV) || errors.Is(err, unix.ESRCH)
+	var linkNotFound netlink.LinkNotFoundError
+	return err == nil || errors.As(err, &linkNotFound) || errors.Is(err, unix.ENOENT) || errors.Is(err, unix.ENODEV) || errors.Is(err, unix.ESRCH)
 }

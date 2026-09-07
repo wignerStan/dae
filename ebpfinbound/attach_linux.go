@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"runtime"
 	"sort"
 	"strings"
 
@@ -19,12 +20,9 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-const (
-	captureUserTCMajor     = uint16(0xdab1)
-	captureInternalTCMajor = uint16(0xdab2)
-)
-
 type ownedTCAttachment struct{ record ownedAttachmentRecord }
+
+var errTCFilterNotFound = errors.New("capture TC filter not found")
 
 func (r *captureRuntime) attachDatapath() ([]ownedTCAttachment, []func() error, error) {
 	if r.bpf == nil || r.netns == nil {
@@ -36,20 +34,29 @@ func (r *captureRuntime) attachDatapath() ([]ownedTCAttachment, []func() error, 
 	var records []ownedTCAttachment
 	cleanup := make([]func() error, 0, 24)
 	fail := func(err error) ([]ownedTCAttachment, []func() error, error) {
-		_ = runCleanupReverse(cleanup)
-		return nil, nil, err
+		return records, cleanup, err
+	}
+	recordAttachment := func(record ownedAttachmentRecord) error {
+		if r.ownership == nil {
+			return errors.New("capture ownership lease is unavailable")
+		}
+		return r.ownership.UpsertAttachment(record)
 	}
 
-	internalRecords, internalCleanup, err := r.attachInternalLinks()
+	internalRecords, internalCleanup, err := r.attachInternalLinks(recordAttachment)
+	records = append(records, internalRecords...)
+	cleanup = append(cleanup, internalCleanup...)
 	if err != nil {
 		return fail(fmt.Errorf("attach private capture links: %w", err))
 	}
-	records = append(records, internalRecords...)
-	cleanup = append(cleanup, internalCleanup...)
 
 	if len(r.config.WANInterfaces) > 0 {
 		cgroupCleanup, attachErr := r.attachProcessMetadata()
 		if attachErr != nil {
+			cleanupErr := runCleanupReverse(cgroupCleanup)
+			if cleanupErr != nil {
+				return fail(errors.Join(fmt.Errorf("attach process metadata hooks: %w", attachErr), fmt.Errorf("roll back process metadata hooks: %w", cleanupErr)))
+			}
 			if r.config.RequireProcessMetadata {
 				return fail(fmt.Errorf("attach required process metadata hooks: %w", attachErr))
 			}
@@ -63,20 +70,20 @@ func (r *captureRuntime) attachDatapath() ([]ownedTCAttachment, []func() error, 
 	}
 
 	for _, interfaceName := range r.config.LANInterfaces {
-		attached, attachedCleanup, attachErr := r.attachLANInterface(interfaceName)
+		attached, attachedCleanup, attachErr := r.attachLANInterface(interfaceName, recordAttachment)
+		records = append(records, attached...)
+		cleanup = append(cleanup, attachedCleanup...)
 		if attachErr != nil {
 			return fail(fmt.Errorf("attach LAN interface %s: %w", interfaceName, attachErr))
 		}
-		records = append(records, attached...)
-		cleanup = append(cleanup, attachedCleanup...)
 	}
 	for _, interfaceName := range r.config.WANInterfaces {
-		attached, attachedCleanup, attachErr := r.attachWANInterface(interfaceName)
+		attached, attachedCleanup, attachErr := r.attachWANInterface(interfaceName, recordAttachment)
+		records = append(records, attached...)
+		cleanup = append(cleanup, attachedCleanup...)
 		if attachErr != nil {
 			return fail(fmt.Errorf("attach WAN interface %s: %w", interfaceName, attachErr))
 		}
-		records = append(records, attached...)
-		cleanup = append(cleanup, attachedCleanup...)
 	}
 	return records, cleanup, nil
 }
@@ -93,11 +100,18 @@ func (r *captureRuntime) configureKernel() error {
 		return err
 	}
 	if len(r.config.LANInterfaces) > 0 {
-		if err := manager.Set("/proc/sys/net/ipv4/ip_forward", "1"); err != nil {
-			return err
-		}
-		if err := manager.Set("/proc/sys/net/ipv6/conf/all/forwarding", "1"); err != nil && !errors.Is(err, os.ErrNotExist) {
-			return err
+		for _, setting := range []struct{ path, value string }{
+			{"/proc/sys/net/ipv4/ip_forward", "1"},
+			{"/proc/sys/net/ipv4/conf/all/src_valid_mark", "1"},
+			{"/proc/sys/net/ipv4/conf/default/src_valid_mark", "1"},
+			{"/proc/sys/net/ipv6/conf/all/forwarding", "1"},
+		} {
+			if err := manager.Set(setting.path, setting.value); err != nil {
+				if strings.Contains(setting.path, "/ipv6/") && errors.Is(err, os.ErrNotExist) {
+					continue
+				}
+				return err
+			}
 		}
 	}
 	for _, interfaceName := range r.config.LANInterfaces {
@@ -139,7 +153,7 @@ func (r *captureRuntime) configureKernel() error {
 	return nil
 }
 
-func (r *captureRuntime) attachLANInterface(interfaceName string) ([]ownedTCAttachment, []func() error, error) {
+func (r *captureRuntime) attachLANInterface(interfaceName string, recordAttachment func(ownedAttachmentRecord) error) ([]ownedTCAttachment, []func() error, error) {
 	link, err := captureInterface(interfaceName)
 	if err != nil {
 		return nil, nil, err
@@ -150,13 +164,13 @@ func (r *captureRuntime) attachLANInterface(interfaceName string) ([]ownedTCAtta
 		ingressProgram, egressProgram = r.bpf.TproxyLanIngressL2, r.bpf.TproxyLanEgressL2
 		ingressName, egressName = "dae_cap_li_l2", "dae_cap_le_l2"
 	}
-	return attachInterfacePair(link, false,
+	return attachInterfacePair(link, false, recordAttachment,
 		newTCFilter(link, netlink.HANDLE_MIN_INGRESS, captureUserTCMajor, 0x101, 2, ingressName, ingressProgram),
 		newTCFilter(link, netlink.HANDLE_MIN_EGRESS, captureUserTCMajor, 0x102, 1, egressName, egressProgram),
 	)
 }
 
-func (r *captureRuntime) attachWANInterface(interfaceName string) ([]ownedTCAttachment, []func() error, error) {
+func (r *captureRuntime) attachWANInterface(interfaceName string, recordAttachment func(ownedAttachmentRecord) error) ([]ownedTCAttachment, []func() error, error) {
 	link, err := captureInterface(interfaceName)
 	if err != nil {
 		return nil, nil, err
@@ -170,13 +184,13 @@ func (r *captureRuntime) attachWANInterface(interfaceName string) ([]ownedTCAtta
 		ingressProgram, egressProgram = r.bpf.TproxyWanIngressL2, r.bpf.TproxyWanEgressL2
 		ingressName, egressName = "dae_cap_wi_l2", "dae_cap_we_l2"
 	}
-	return attachInterfacePair(link, false,
+	return attachInterfacePair(link, false, recordAttachment,
 		newTCFilter(link, netlink.HANDLE_MIN_EGRESS, captureUserTCMajor, 0x201, 2, egressName, egressProgram),
 		newTCFilter(link, netlink.HANDLE_MIN_INGRESS, captureUserTCMajor, 0x202, 1, ingressName, ingressProgram),
 	)
 }
 
-func (r *captureRuntime) attachInternalLinks() ([]ownedTCAttachment, []func() error, error) {
+func (r *captureRuntime) attachInternalLinks(recordAttachment func(ownedAttachmentRecord) error) ([]ownedTCAttachment, []func() error, error) {
 	if r.netns.hostLink == nil || r.netns.peerLink == nil {
 		return nil, nil, errors.New("private capture links are unavailable")
 	}
@@ -187,22 +201,27 @@ func (r *captureRuntime) attachInternalLinks() ([]ownedTCAttachment, []func() er
 	var peerCleanup []func() error
 	if err := r.netns.With(func() error {
 		var attachErr error
-		peerRecord, peerCleanup, attachErr = attachSingleFilter(r.netns.peerLink, true, peerFilter)
+		peerRecord, peerCleanup, attachErr = attachSingleFilter(r.netns.peerLink, true, peerFilter, recordAttachment)
 		return attachErr
 	}); err != nil {
-		return nil, nil, err
+		if peerRecord.record.Interface != "" {
+			records = append(records, peerRecord)
+		}
+		cleanup = append(cleanup, peerCleanup...)
+		return records, cleanup, err
 	}
 	records = append(records, peerRecord)
 	cleanup = append(cleanup, peerCleanup...)
 
 	hostFilter := newTCFilter(r.netns.hostLink, netlink.HANDLE_MIN_INGRESS, captureInternalTCMajor, 0x002, 0, "dae_cap_host", r.bpf.TproxyDae0Ingress)
-	hostRecord, hostCleanup, err := attachSingleFilter(r.netns.hostLink, false, hostFilter)
-	if err != nil {
-		_ = runCleanupReverse(cleanup)
-		return nil, nil, err
+	hostRecord, hostCleanup, err := attachSingleFilter(r.netns.hostLink, false, hostFilter, recordAttachment)
+	if hostRecord.record.Interface != "" {
+		records = append(records, hostRecord)
 	}
-	records = append(records, hostRecord)
 	cleanup = append(cleanup, hostCleanup...)
+	if err != nil {
+		return records, cleanup, err
+	}
 	return records, cleanup, nil
 }
 
@@ -225,13 +244,11 @@ func (r *captureRuntime) attachProcessMetadata() ([]func() error, error) {
 	cleanup := make([]func() error, 0, len(programs))
 	for _, item := range programs {
 		if item.program == nil {
-			_ = runCleanupReverse(cleanup)
-			return nil, errors.New("capture collection is missing a process metadata hook")
+			return cleanup, errors.New("capture collection is missing a process metadata hook")
 		}
 		attached, err := ciliumLink.AttachCgroup(ciliumLink.CgroupOptions{Path: cgroupPath, Attach: item.attach, Program: item.program})
 		if err != nil {
-			_ = runCleanupReverse(cleanup)
-			return nil, fmt.Errorf("attach cgroup program: %w", err)
+			return cleanup, fmt.Errorf("attach cgroup program: %w", err)
 		}
 		link := attached
 		cleanup = append(cleanup, link.Close)
@@ -262,25 +279,39 @@ func newTCFilter(link netlink.Link, parent uint32, major, minor, priority uint16
 	filter := &netlink.BpfFilter{FilterAttrs: netlink.FilterAttrs{LinkIndex: link.Attrs().Index, Parent: parent, Handle: netlink.MakeHandle(major, minor), Protocol: unix.ETH_P_ALL, Priority: priority}, Name: name, DirectAction: true, Fd: -1}
 	if program != nil {
 		filter.Fd = program.FD()
+		if info, err := program.Info(); err == nil {
+			if id, available := info.ID(); available {
+				filter.Id = int(id)
+			}
+		}
 	}
 	return filter
 }
 
-func attachInterfacePair(link netlink.Link, inNetNS bool, first, second *netlink.BpfFilter) ([]ownedTCAttachment, []func() error, error) {
-	firstRecord, firstCleanup, err := attachSingleFilter(link, inNetNS, first)
-	if err != nil {
-		return nil, nil, err
+func attachInterfacePair(link netlink.Link, inNetNS bool, recordAttachment func(ownedAttachmentRecord) error, first, second *netlink.BpfFilter) ([]ownedTCAttachment, []func() error, error) {
+	var records []ownedTCAttachment
+	var cleanup []func() error
+	firstRecord, firstCleanup, err := attachSingleFilter(link, inNetNS, first, recordAttachment)
+	if firstRecord.record.Interface != "" {
+		records = append(records, firstRecord)
 	}
-	secondRecord, secondCleanup, err := attachSingleFilter(link, inNetNS, second)
+	cleanup = append(cleanup, firstCleanup...)
 	if err != nil {
-		_ = runCleanupReverse(firstCleanup)
-		return nil, nil, err
+		return records, cleanup, err
 	}
-	return []ownedTCAttachment{firstRecord, secondRecord}, append(firstCleanup, secondCleanup...), nil
+	secondRecord, secondCleanup, err := attachSingleFilter(link, inNetNS, second, recordAttachment)
+	if secondRecord.record.Interface != "" {
+		records = append(records, secondRecord)
+	}
+	cleanup = append(cleanup, secondCleanup...)
+	if err != nil {
+		return records, cleanup, err
+	}
+	return records, cleanup, nil
 }
 
-func attachSingleFilter(link netlink.Link, inNetNS bool, filter *netlink.BpfFilter) (ownedTCAttachment, []func() error, error) {
-	if link == nil || link.Attrs() == nil || filter == nil || filter.Fd < 0 {
+func attachSingleFilter(link netlink.Link, inNetNS bool, filter *netlink.BpfFilter, recordAttachment func(ownedAttachmentRecord) error) (ownedTCAttachment, []func() error, error) {
+	if link == nil || link.Attrs() == nil || filter == nil || filter.Fd < 0 || filter.Id <= 0 {
 		return ownedTCAttachment{}, nil, errors.New("invalid BPF TC filter")
 	}
 	qdisc, qdiscCreated, err := ensureClsact(link)
@@ -288,36 +319,60 @@ func attachSingleFilter(link netlink.Link, inNetNS bool, filter *netlink.BpfFilt
 		return ownedTCAttachment{}, nil, err
 	}
 	cleanupQdisc := func() error {
-		if !qdiscCreated || !interfaceFiltersEmpty(link) {
+		remove := func() error {
+			if !qdiscCreated {
+				return nil
+			}
+			empty, err := interfaceFiltersEmpty(link)
+			if err != nil {
+				return fmt.Errorf("inspect owned clsact qdisc on %s: %w", link.Attrs().Name, err)
+			}
+			if !empty {
+				return nil
+			}
+			if err := netlink.QdiscDel(qdisc); err != nil && !isMissingNetlinkError(err) {
+				return fmt.Errorf("delete owned clsact qdisc on %s: %w", link.Attrs().Name, err)
+			}
 			return nil
 		}
-		if err := netlink.QdiscDel(qdisc); err != nil && !isMissingNetlinkError(err) {
-			return fmt.Errorf("delete owned clsact qdisc on %s: %w", link.Attrs().Name, err)
+		if !inNetNS {
+			return remove()
 		}
-		return nil
+		return withNamedNetNS(captureNetNSName, remove)
+	}
+	record := ownedAttachmentRecord{Interface: link.Attrs().Name, InNetNS: inNetNS, Parent: filter.Attrs().Parent, Handle: filter.Attrs().Handle, Priority: filter.Attrs().Priority, Name: filter.Name, ProgramID: filter.Id, QdiscCreated: qdiscCreated}
+	attachment := ownedTCAttachment{record: record}
+	cleanup := []func() error{cleanupQdisc}
+	if recordAttachment != nil {
+		if err := recordAttachment(record); err != nil {
+			return attachment, cleanup, fmt.Errorf("record capture TC filter intent %s: %w", filter.Name, err)
+		}
 	}
 	if err := assertTCSlotFree(link, filter); err != nil {
-		_ = cleanupQdisc()
-		return ownedTCAttachment{}, nil, err
+		return attachment, cleanup, err
 	}
 	if err := netlink.FilterAdd(filter); err != nil {
-		_ = cleanupQdisc()
-		return ownedTCAttachment{}, nil, fmt.Errorf("add capture TC filter %s: %w", filter.Name, err)
+		return attachment, cleanup, fmt.Errorf("add capture TC filter %s: %w", filter.Name, err)
 	}
+	cleanup = append(cleanup, func() error { return deleteOwnedFilter(record) })
 	actual, err := findTCFilter(link, filter.Attrs().Parent, filter.Attrs().Handle)
 	if err != nil {
-		_ = netlink.FilterDel(filter)
-		_ = cleanupQdisc()
-		return ownedTCAttachment{}, nil, err
+		return attachment, cleanup, err
 	}
 	bpfActual, ok := actual.(*netlink.BpfFilter)
 	if !ok || bpfActual.Name != filter.Name {
-		_ = netlink.FilterDel(filter)
-		_ = cleanupQdisc()
-		return ownedTCAttachment{}, nil, fmt.Errorf("capture TC filter identity mismatch on %s", link.Attrs().Name)
+		return attachment, cleanup, fmt.Errorf("capture TC filter identity mismatch on %s", link.Attrs().Name)
 	}
-	record := ownedAttachmentRecord{Interface: link.Attrs().Name, InNetNS: inNetNS, Parent: bpfActual.Attrs().Parent, Handle: bpfActual.Attrs().Handle, Priority: bpfActual.Attrs().Priority, Name: bpfActual.Name, ProgramID: bpfActual.Id, QdiscCreated: qdiscCreated}
-	return ownedTCAttachment{record: record}, []func() error{func() error { return deleteOwnedFilter(record) }, cleanupQdisc}, nil
+	record = ownedAttachmentRecord{Interface: link.Attrs().Name, InNetNS: inNetNS, Parent: bpfActual.Attrs().Parent, Handle: bpfActual.Attrs().Handle, Priority: bpfActual.Attrs().Priority, Name: bpfActual.Name, ProgramID: bpfActual.Id, QdiscCreated: qdiscCreated}
+	attachment.record = record
+	if recordAttachment != nil {
+		if err := recordAttachment(record); err != nil {
+			return attachment, cleanup, fmt.Errorf("record attached TC filter %s: %w", filter.Name, err)
+		}
+	}
+	// Cleanup runs in reverse order: remove the filter before deciding whether
+	// the clsact qdisc created for it is now empty and can be removed.
+	return attachment, cleanup, nil
 }
 
 func ensureClsact(link netlink.Link) (*netlink.GenericQdisc, bool, error) {
@@ -374,7 +429,7 @@ func findTCFilter(link netlink.Link, parent, handle uint32, _ ...uint16) (netlin
 			return filter, nil
 		}
 	}
-	return nil, fmt.Errorf("newly attached TC filter was not found on %s parent=%#x handle=%#x; observed: %s", link.Attrs().Name, parent, handle, strings.Join(observed, ", "))
+	return nil, fmt.Errorf("%w on %s parent=%#x handle=%#x; observed: %s", errTCFilterNotFound, link.Attrs().Name, parent, handle, strings.Join(observed, ", "))
 }
 
 func deleteOwnedFilter(record ownedAttachmentRecord) error {
@@ -388,13 +443,13 @@ func deleteOwnedFilter(record ownedAttachmentRecord) error {
 		}
 		filter, err := findTCFilter(link, record.Parent, record.Handle)
 		if err != nil {
-			if strings.Contains(err.Error(), "not found") {
+			if errors.Is(err, errTCFilterNotFound) {
 				return nil
 			}
 			return err
 		}
 		bpfFilter, ok := filter.(*netlink.BpfFilter)
-		if !ok || bpfFilter.Name != record.Name || (record.ProgramID != 0 && bpfFilter.Id != record.ProgramID) {
+		if !ok || bpfFilter.Name != record.Name || bpfFilter.Id != record.ProgramID {
 			return fmt.Errorf("refuse to delete TC filter on %s: ownership identity changed", record.Interface)
 		}
 		if err := netlink.FilterDel(filter); err != nil && !isMissingNetlinkError(err) {
@@ -415,10 +470,59 @@ func cleanupStaleAttachments(records []ownedAttachmentRecord) error {
 			errs = append(errs, err)
 		}
 	}
+	for index := len(records) - 1; index >= 0; index-- {
+		if err := deleteOwnedQdisc(records[index]); err != nil {
+			errs = append(errs, err)
+		}
+	}
 	return errors.Join(errs...)
 }
 
+func deleteOwnedQdisc(record ownedAttachmentRecord) error {
+	if !record.QdiscCreated {
+		return nil
+	}
+	remove := func() error {
+		link, err := netlink.LinkByName(record.Interface)
+		if err != nil {
+			if isMissingNetlinkError(err) {
+				return nil
+			}
+			return err
+		}
+		empty, err := interfaceFiltersEmpty(link)
+		if err != nil {
+			return fmt.Errorf("inspect filters on %s: %w", record.Interface, err)
+		}
+		if !empty {
+			// The qdisc is no longer exclusively ours; leave it for its current
+			// users after removing only the filter whose identity we recorded.
+			return nil
+		}
+		qdiscs, err := netlink.QdiscList(link)
+		if err != nil {
+			return fmt.Errorf("list qdiscs on %s: %w", record.Interface, err)
+		}
+		for _, qdisc := range qdiscs {
+			if qdisc == nil || qdisc.Type() != "clsact" {
+				continue
+			}
+			if err := netlink.QdiscDel(qdisc); err != nil && !isMissingNetlinkError(err) {
+				return fmt.Errorf("delete owned clsact qdisc on %s: %w", record.Interface, err)
+			}
+			return nil
+		}
+		return nil
+	}
+	if !record.InNetNS {
+		return remove()
+	}
+	return withNamedNetNS(captureNetNSName, remove)
+}
+
 func withNamedNetNS(name string, function func() error) (err error) {
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
 	host, err := netns.Get()
 	if err != nil {
 		return err
@@ -439,14 +543,17 @@ func withNamedNetNS(name string, function func() error) (err error) {
 	return function()
 }
 
-func interfaceFiltersEmpty(link netlink.Link) bool {
+func interfaceFiltersEmpty(link netlink.Link) (bool, error) {
 	for _, parent := range []uint32{netlink.HANDLE_MIN_INGRESS, netlink.HANDLE_MIN_EGRESS} {
 		filters, err := netlink.FilterList(link, parent)
-		if err != nil || len(filters) != 0 {
-			return false
+		if err != nil {
+			return false, err
+		}
+		if len(filters) != 0 {
+			return false, nil
 		}
 	}
-	return true
+	return true, nil
 }
 
 func detectCgroupPath() (string, error) {

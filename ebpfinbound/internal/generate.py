@@ -16,7 +16,8 @@ if not (source / "headers").is_dir():
     raise SystemExit("dae BPF headers submodule is missing; run git submodule update --init --recursive")
 
 with tempfile.TemporaryDirectory(prefix="dae-ebpfinbound-generate-") as temporary:
-    kern = Path(temporary) / "kern"
+    temporary_path = Path(temporary).resolve()
+    kern = temporary_path / "kern"
     shutil.copytree(source, kern, symlinks=True)
     tproxy = kern / "tproxy.c"
     text = tproxy.read_text()
@@ -25,22 +26,36 @@ with tempfile.TemporaryDirectory(prefix="dae-ebpfinbound-generate-") as temporar
     if "DAE_CAPTURE_ONLY" not in text or "wan_outbound_is_alive" not in text:
         raise SystemExit("capture-only connectivity seam missing from canonical dae BPF source")
 
+    cflags = " ".join([
+        "-DMAX_MATCH_SET_LEN=1024",
+        "-DDAE_CAPTURE_ONLY=1",
+        "-O2",
+        "-Wall",
+        "-Werror",
+        "-fdebug-compilation-dir=.",
+        f"-ffile-prefix-map={temporary_path}=.",
+        f"-fdebug-prefix-map={temporary_path}=.",
+    ])
     command = [
         "go", "run", "-mod=mod", "github.com/cilium/ebpf/cmd/bpf2go@v0.20.0",
         "-cc", os.environ.get("BPF_CLANG", "clang"),
         "-no-strip",
         "-no-global-types",
-        "-cflags", "-DMAX_MATCH_SET_LEN=1024 -DDAE_CAPTURE_ONLY=1 -O2 -Wall -Werror",
+        "-cflags", cflags,
+        "-output-dir", str(module),
         "-target", "bpfel,bpfeb",
         "-type", "dae_param",
         "-type", "tuples_key",
         "-type", "conn_state",
         "-type", "routing_handoff_entry",
-        "bpf", str(tproxy), "--", f"-I{kern / 'headers'}",
+        "bpf", "tproxy.c", "--", "-Iheaders",
     ]
     environment = os.environ.copy()
     environment["GOPACKAGE"] = "ebpfinbound"
-    subprocess.run(command, cwd=module, env=environment, check=True)
+    environment["LC_ALL"] = "C"
+    environment["SOURCE_DATE_EPOCH"] = "0"
+    environment["TZ"] = "UTC"
+    subprocess.run(command, cwd=kern, env=environment, check=True)
 
 for name in ("bpf_bpfel.go", "bpf_bpfeb.go"):
     path = module / name

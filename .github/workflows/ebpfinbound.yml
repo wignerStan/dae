@@ -1,0 +1,104 @@
+name: eBPF inbound provider
+
+on:
+  pull_request:
+    paths:
+      - "control/kern/**"
+      - "ebpfinbound/**"
+      - ".github/workflows/ebpfinbound.yml"
+  push:
+    branches:
+      - main
+    paths:
+      - "control/kern/**"
+      - "ebpfinbound/**"
+      - ".github/workflows/ebpfinbound.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ebpfinbound-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    name: Real Linux eBPF datapath
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+          submodules: recursive
+
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version: "1.26.x"
+          cache-dependency-path: ebpfinbound/go.sum
+
+      - name: Install eBPF tooling
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y clang iproute2 libbpf-dev llvm
+
+      - name: Verify deterministic BPF generation
+        working-directory: ebpfinbound
+        run: |
+          set -euxo pipefail
+          go generate ./...
+          cp bpf_bpfel.o "$RUNNER_TEMP/bpf_bpfel.o"
+          cp bpf_bpfeb.o "$RUNNER_TEMP/bpf_bpfeb.o"
+          go generate ./...
+          cmp "$RUNNER_TEMP/bpf_bpfel.o" bpf_bpfel.o
+          cmp "$RUNNER_TEMP/bpf_bpfeb.o" bpf_bpfeb.o
+          ! strings bpf_bpfel.o bpf_bpfeb.o | grep -E 'dae-ebpfinbound-generate-|/tmp/'
+          git diff --exit-code -- bpf_bpfel.go bpf_bpfeb.go
+
+      - name: Test provider and dependency boundary
+        working-directory: ebpfinbound
+        run: |
+          set -euxo pipefail
+          test -z "$(gofmt -l -- *.go cmd/dae-ebpf-tool/*.go)"
+          go mod tidy
+          git diff --exit-code -- go.mod go.sum
+          go test -race ./...
+          go vet ./...
+          go build ./...
+          dependencies=$(go list -deps ./...)
+          if grep -E 'github.com/daeuniverse/dae/(cmd|common|component|config|control|pkg)|github.com/daeuniverse/outbound|github.com/olicesx/quic-go|github.com/quic-go/qpack|github.com/sirupsen/logrus' <<<"$dependencies"; then
+            echo 'daemon, policy, outbound, QUIC, qpack, or legacy logging dependency leaked into the capture provider' >&2
+            exit 1
+          fi
+          ! grep -R -E 'OpenGeneration|CloneGeneration|CommitGeneration' --include='*.go' .
+
+      - name: Exercise real privileged LAN and WAN capture
+        working-directory: ebpfinbound
+        run: |
+          set -euxo pipefail
+          sudo mkdir -p /run/netns
+          sudo env \
+            PATH="$PATH" \
+            HOME="$HOME" \
+            GOCACHE="$RUNNER_TEMP/root-go-cache" \
+            GOMODCACHE="$(go env GOMODCACHE)" \
+            go test -tags=integration -run '^TestPrivilegedCaptureLifecycleAndTraffic$' -count=2 -v .
+          sudo test ! -e /run/dae-ebpfinbound/owner.json
+          ! ip link show dae-ebpf0
+          ! ip link show daecilan0
+          ! ip link show daeciwan0
+          ! ip netns list | grep -E '^(dae-ebpf-inbound|dae-ci-lan|dae-ci-wan)( |$)'
+
+      - name: Clean test resources after failure
+        if: always()
+        working-directory: ebpfinbound
+        run: |
+          if sudo test -e /run/dae-ebpfinbound/owner.json; then
+            sudo env PATH="$PATH" HOME="$HOME" GOMODCACHE="$(go env GOMODCACHE)" go run ./cmd/dae-ebpf-tool cleanup-stale || true
+          fi
+          sudo ip link delete daecilan0 2>/dev/null || true
+          sudo ip link delete daeciwan0 2>/dev/null || true
+          sudo ip netns delete dae-ci-lan 2>/dev/null || true
+          sudo ip netns delete dae-ci-wan 2>/dev/null || true

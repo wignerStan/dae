@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -22,7 +23,7 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-const ownershipRecordVersion = 1
+const ownershipRecordVersion = 2
 
 var runtimeStateDirectory = "/run/dae-ebpfinbound"
 
@@ -42,16 +43,19 @@ type ownedAttachmentRecord struct {
 }
 
 type ownershipRecord struct {
-	Version     int                     `json:"version"`
-	Token       string                  `json:"token"`
-	PID         int                     `json:"pid"`
-	BootID      string                  `json:"boot_id"`
-	StartedAt   time.Time               `json:"started_at"`
-	Namespace   string                  `json:"namespace"`
-	HostLink    string                  `json:"host_link"`
-	PeerLink    string                  `json:"peer_link"`
-	Attachments []ownedAttachmentRecord `json:"attachments,omitempty"`
-	Sysctls     []sysctlMutation        `json:"sysctls,omitempty"`
+	Version       int                     `json:"version"`
+	Token         string                  `json:"token"`
+	PID           int                     `json:"pid"`
+	BootID        string                  `json:"boot_id"`
+	StartedAt     time.Time               `json:"started_at"`
+	Released      bool                    `json:"released,omitempty"`
+	Namespace     string                  `json:"namespace"`
+	HostLink      string                  `json:"host_link"`
+	PeerLink      string                  `json:"peer_link"`
+	LANInterfaces []string                `json:"lan_interfaces,omitempty"`
+	WANInterfaces []string                `json:"wan_interfaces,omitempty"`
+	Attachments   []ownedAttachmentRecord `json:"attachments,omitempty"`
+	Sysctls       []sysctlMutation        `json:"sysctls,omitempty"`
 }
 
 type ownershipLease struct {
@@ -86,6 +90,9 @@ func acquireOwnership(report PreflightReport) (*ownershipLease, error) {
 		if decodeErr := json.Unmarshal(raw, &record); decodeErr != nil {
 			return fail(fmt.Errorf("invalid stale ownership record: %w", decodeErr))
 		}
+		if validateErr := validateOwnershipRecord(record); validateErr != nil {
+			return fail(fmt.Errorf("invalid stale ownership record: %w", validateErr))
+		}
 		return fail(fmt.Errorf("stale dae eBPF ownership record for pid %d exists; run `dae-ebpf-tool cleanup-stale` after verifying no runtime is active", record.PID))
 	} else if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return fail(fmt.Errorf("read ownership record: %w", err))
@@ -101,7 +108,18 @@ func acquireOwnership(report PreflightReport) (*ownershipLease, error) {
 	if err != nil {
 		return fail(err)
 	}
-	lease := &ownershipLease{lockFile: lockFile, record: ownershipRecord{Version: ownershipRecordVersion, Token: token, PID: os.Getpid(), BootID: bootID, StartedAt: time.Now().UTC(), Namespace: captureNetNSName, HostLink: captureHostLink, PeerLink: capturePeerLink}}
+	lease := &ownershipLease{lockFile: lockFile, record: ownershipRecord{
+		Version:       ownershipRecordVersion,
+		Token:         token,
+		PID:           os.Getpid(),
+		BootID:        bootID,
+		StartedAt:     time.Now().UTC(),
+		Namespace:     captureNetNSName,
+		HostLink:      captureHostLink,
+		PeerLink:      capturePeerLink,
+		LANInterfaces: append([]string(nil), report.Config.LANInterfaces...),
+		WANInterfaces: append([]string(nil), report.Config.WANInterfaces...),
+	}}
 	if err := lease.persistLocked(); err != nil {
 		return fail(err)
 	}
@@ -128,6 +146,29 @@ func (l *ownershipLease) SetAttachments(records []ownedAttachmentRecord) error {
 	l.record.Attachments = append([]ownedAttachmentRecord(nil), records...)
 	return l.persistLocked()
 }
+func (l *ownershipLease) UpsertAttachment(record ownedAttachmentRecord) error {
+	if l == nil {
+		return nil
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.closed {
+		return errors.New("ownership lease is closed")
+	}
+	replaced := false
+	for index := range l.record.Attachments {
+		current := l.record.Attachments[index]
+		if current.Interface == record.Interface && current.InNetNS == record.InNetNS && current.Parent == record.Parent && current.Handle == record.Handle {
+			l.record.Attachments[index] = record
+			replaced = true
+			break
+		}
+	}
+	if !replaced {
+		l.record.Attachments = append(l.record.Attachments, record)
+	}
+	return l.persistLocked()
+}
 func (l *ownershipLease) SetSysctls(mutations []sysctlMutation) error {
 	if l == nil {
 		return nil
@@ -142,21 +183,55 @@ func (l *ownershipLease) SetSysctls(mutations []sysctlMutation) error {
 }
 
 func (l *ownershipLease) persistLocked() error {
+	if err := validateOwnershipRecord(l.record); err != nil {
+		return fmt.Errorf("validate ownership record: %w", err)
+	}
 	raw, err := json.MarshalIndent(l.record, "", "  ")
 	if err != nil {
 		return err
 	}
 	raw = append(raw, '\n')
-	if err := os.WriteFile(ownerRecordTemp(), raw, 0o600); err != nil {
+	file, err := os.OpenFile(ownerRecordTemp(), os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+	if err != nil {
 		return fmt.Errorf("write ownership record: %w", err)
+	}
+	if _, err := file.Write(raw); err != nil {
+		_ = file.Close()
+		return fmt.Errorf("write ownership record: %w", err)
+	}
+	if err := file.Sync(); err != nil {
+		_ = file.Close()
+		return fmt.Errorf("sync ownership record: %w", err)
+	}
+	if err := file.Close(); err != nil {
+		return fmt.Errorf("close ownership record: %w", err)
 	}
 	if err := os.Rename(ownerRecordTemp(), ownerRecordPath()); err != nil {
 		return fmt.Errorf("publish ownership record: %w", err)
+	}
+	directory, err := os.Open(runtimeStateDirectory)
+	if err != nil {
+		return fmt.Errorf("open ownership directory: %w", err)
+	}
+	if err := directory.Sync(); err != nil {
+		_ = directory.Close()
+		return fmt.Errorf("sync ownership directory: %w", err)
+	}
+	if err := directory.Close(); err != nil {
+		return fmt.Errorf("close ownership directory: %w", err)
 	}
 	return nil
 }
 
 func (l *ownershipLease) Close() error {
+	return l.release(true)
+}
+
+func (l *ownershipLease) Abandon() error {
+	return l.release(false)
+}
+
+func (l *ownershipLease) release(removeRecord bool) error {
 	if l == nil {
 		return nil
 	}
@@ -165,21 +240,31 @@ func (l *ownershipLease) Close() error {
 		l.mu.Unlock()
 		return nil
 	}
+	var errs []error
+	if !removeRecord {
+		l.record.Released = true
+		if err := l.persistLocked(); err != nil {
+			errs = append(errs, fmt.Errorf("mark ownership record released: %w", err))
+		}
+	}
 	l.closed = true
 	lockFile := l.lockFile
 	l.lockFile = nil
 	token := l.record.Token
 	l.mu.Unlock()
-	var errs []error
-	if raw, err := os.ReadFile(ownerRecordPath()); err == nil {
-		var current ownershipRecord
-		if json.Unmarshal(raw, &current) == nil && current.Token == token {
-			if err := os.Remove(ownerRecordPath()); err != nil && !errors.Is(err, os.ErrNotExist) {
-				errs = append(errs, err)
+	if removeRecord {
+		if raw, err := os.ReadFile(ownerRecordPath()); err == nil {
+			var current ownershipRecord
+			if decodeErr := json.Unmarshal(raw, &current); decodeErr != nil {
+				errs = append(errs, fmt.Errorf("decode current ownership record: %w", decodeErr))
+			} else if current.Token == token {
+				if err := os.Remove(ownerRecordPath()); err != nil && !errors.Is(err, os.ErrNotExist) {
+					errs = append(errs, err)
+				}
 			}
+		} else if !errors.Is(err, os.ErrNotExist) {
+			errs = append(errs, err)
 		}
-	} else if !errors.Is(err, os.ErrNotExist) {
-		errs = append(errs, err)
 	}
 	if lockFile != nil {
 		if err := unix.Flock(int(lockFile.Fd()), unix.LOCK_UN); err != nil {
@@ -225,8 +310,14 @@ func CleanupStale(ctx context.Context) error {
 	if err := json.Unmarshal(raw, &record); err != nil {
 		return fmt.Errorf("decode ownership record: %w", err)
 	}
-	bootID, _ := readBootID()
-	if record.BootID == bootID && pidAlive(record.PID) {
+	if err := validateOwnershipRecord(record); err != nil {
+		return fmt.Errorf("refuse invalid ownership record: %w", err)
+	}
+	bootID, err := readBootID()
+	if err != nil {
+		return err
+	}
+	if !record.Released && record.BootID == bootID && pidAlive(record.PID) {
 		return fmt.Errorf("recorded runtime pid %d is still active", record.PID)
 	}
 	var errs []error
@@ -272,6 +363,169 @@ func cleanupRecordedNetNS(record ownershipRecord) error {
 		}
 	}
 	return errors.Join(errs...)
+}
+
+func validateOwnershipRecord(record ownershipRecord) error {
+	if record.Version != ownershipRecordVersion {
+		return fmt.Errorf("unsupported version %d", record.Version)
+	}
+	const tokenPrefix = "dae-ebpfinbound:"
+	encodedToken := strings.TrimPrefix(record.Token, tokenPrefix)
+	if encodedToken == record.Token || len(encodedToken) != 32 {
+		return errors.New("invalid ownership token")
+	}
+	if _, err := hex.DecodeString(encodedToken); err != nil {
+		return fmt.Errorf("invalid ownership token: %w", err)
+	}
+	if record.PID <= 0 || record.BootID == "" || record.StartedAt.IsZero() {
+		return errors.New("incomplete owner identity")
+	}
+	if record.Namespace != captureNetNSName || record.HostLink != captureHostLink || record.PeerLink != capturePeerLink {
+		return errors.New("ownership record names do not match the provider's fixed resources")
+	}
+	if len(record.LANInterfaces) > 64 || len(record.WANInterfaces) > 64 || len(record.Attachments) > 64 || len(record.Sysctls) > 128 {
+		return errors.New("ownership record exceeds resource limits")
+	}
+	lanInterfaces, err := validateRecordedInterfaces("LAN", record.LANInterfaces)
+	if err != nil {
+		return err
+	}
+	wanInterfaces, err := validateRecordedInterfaces("WAN", record.WANInterfaces)
+	if err != nil {
+		return err
+	}
+	attachmentSlots := make(map[string]struct{}, len(record.Attachments))
+	for _, attachment := range record.Attachments {
+		if err := validateOwnedAttachment(attachment, lanInterfaces, wanInterfaces); err != nil {
+			return err
+		}
+		slot := fmt.Sprintf("%t:%s:%d:%d", attachment.InNetNS, attachment.Interface, attachment.Parent, attachment.Handle)
+		if _, exists := attachmentSlots[slot]; exists {
+			return fmt.Errorf("duplicate attachment slot %s", slot)
+		}
+		attachmentSlots[slot] = struct{}{}
+	}
+	for _, mutation := range record.Sysctls {
+		if err := validateRecordedSysctl(mutation, lanInterfaces, wanInterfaces); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func validateRecordedInterfaces(role string, names []string) (map[string]struct{}, error) {
+	result := make(map[string]struct{}, len(names))
+	if !sort.StringsAreSorted(names) {
+		return nil, fmt.Errorf("%s interfaces are not sorted", role)
+	}
+	for _, name := range names {
+		if name == "" || name == "lo" || name == captureHostLink || name == capturePeerLink || len(name) >= unix.IFNAMSIZ || strings.ContainsAny(name, "/\x00\r\n") {
+			return nil, fmt.Errorf("invalid %s interface %q", role, name)
+		}
+		if _, exists := result[name]; exists {
+			return nil, fmt.Errorf("duplicate %s interface %q", role, name)
+		}
+		result[name] = struct{}{}
+	}
+	return result, nil
+}
+
+func validateOwnedAttachment(record ownedAttachmentRecord, lanInterfaces, wanInterfaces map[string]struct{}) error {
+	if record.Interface == "" || len(record.Interface) >= unix.IFNAMSIZ || strings.Contains(record.Interface, "/") {
+		return fmt.Errorf("invalid attachment interface %q", record.Interface)
+	}
+	if record.ProgramID <= 0 {
+		return fmt.Errorf("invalid program id %d", record.ProgramID)
+	}
+	type expectedAttachment struct {
+		parent uint32
+		handle uint32
+		role   string
+	}
+	expectedUser := map[string]expectedAttachment{
+		"dae_cap_li_l2": {netlink.HANDLE_MIN_INGRESS, netlink.MakeHandle(captureUserTCMajor, 0x101), "LAN"},
+		"dae_cap_li_l3": {netlink.HANDLE_MIN_INGRESS, netlink.MakeHandle(captureUserTCMajor, 0x101), "LAN"},
+		"dae_cap_le_l2": {netlink.HANDLE_MIN_EGRESS, netlink.MakeHandle(captureUserTCMajor, 0x102), "LAN"},
+		"dae_cap_le_l3": {netlink.HANDLE_MIN_EGRESS, netlink.MakeHandle(captureUserTCMajor, 0x102), "LAN"},
+		"dae_cap_we_l2": {netlink.HANDLE_MIN_EGRESS, netlink.MakeHandle(captureUserTCMajor, 0x201), "WAN"},
+		"dae_cap_we_l3": {netlink.HANDLE_MIN_EGRESS, netlink.MakeHandle(captureUserTCMajor, 0x201), "WAN"},
+		"dae_cap_wi_l2": {netlink.HANDLE_MIN_INGRESS, netlink.MakeHandle(captureUserTCMajor, 0x202), "WAN"},
+		"dae_cap_wi_l3": {netlink.HANDLE_MIN_INGRESS, netlink.MakeHandle(captureUserTCMajor, 0x202), "WAN"},
+	}
+	if expected, exists := expectedUser[record.Name]; exists {
+		if record.Interface == captureHostLink || record.Interface == capturePeerLink || record.InNetNS || record.Parent != expected.parent || record.Handle != expected.handle {
+			return fmt.Errorf("invalid user attachment %s on %s", record.Name, record.Interface)
+		}
+		allowed := lanInterfaces
+		if expected.role == "WAN" {
+			allowed = wanInterfaces
+		}
+		if _, exists := allowed[record.Interface]; !exists {
+			return fmt.Errorf("%s attachment %s uses unrecorded interface %s", expected.role, record.Name, record.Interface)
+		}
+		return nil
+	}
+	if record.Name == "dae_cap_host" {
+		if record.Interface != captureHostLink || record.InNetNS || record.Parent != netlink.HANDLE_MIN_INGRESS || record.Handle != netlink.MakeHandle(captureInternalTCMajor, 0x002) {
+			return errors.New("invalid host capture attachment")
+		}
+		return nil
+	}
+	if record.Name == "dae_cap_peer" {
+		if record.Interface != capturePeerLink || !record.InNetNS || record.Parent != netlink.HANDLE_MIN_INGRESS || record.Handle != netlink.MakeHandle(captureInternalTCMajor, 0x001) {
+			return errors.New("invalid peer capture attachment")
+		}
+		return nil
+	}
+	return fmt.Errorf("invalid attachment name %q", record.Name)
+}
+
+func validateRecordedSysctl(mutation sysctlMutation, lanInterfaces, wanInterfaces map[string]struct{}) error {
+	clean := filepath.Clean(mutation.Path)
+	if clean != mutation.Path || strings.ContainsAny(mutation.Original+mutation.Applied, "\x00\r\n") {
+		return fmt.Errorf("invalid recorded sysctl %q", mutation.Path)
+	}
+	for _, value := range []string{mutation.Original, mutation.Applied} {
+		if value != "0" && value != "1" && value != "2" {
+			return fmt.Errorf("invalid recorded sysctl value %q", value)
+		}
+	}
+	global := map[string]struct{}{
+		"/proc/sys/net/ipv4/ip_forward":                  {},
+		"/proc/sys/net/ipv4/conf/all/arp_filter":         {},
+		"/proc/sys/net/ipv4/conf/all/rp_filter":          {},
+		"/proc/sys/net/ipv4/conf/all/src_valid_mark":     {},
+		"/proc/sys/net/ipv4/conf/default/src_valid_mark": {},
+		"/proc/sys/net/ipv6/conf/all/forwarding":         {},
+	}
+	if _, exists := global[clean]; exists {
+		return nil
+	}
+	parts := strings.Split(strings.TrimPrefix(clean, "/proc/sys/net/"), "/")
+	if len(parts) != 4 || parts[1] != "conf" {
+		return fmt.Errorf("invalid recorded sysctl path %q", mutation.Path)
+	}
+	family, interfaceName, key := parts[0], parts[2], parts[3]
+	if interfaceName == captureHostLink {
+		allowed := map[string]map[string]struct{}{
+			"ipv4": {"accept_local": {}, "arp_filter": {}, "rp_filter": {}},
+			"ipv6": {"disable_ipv6": {}, "forwarding": {}},
+		}
+		if keys, exists := allowed[family]; exists {
+			if _, exists := keys[key]; exists {
+				return nil
+			}
+		}
+	}
+	if _, exists := lanInterfaces[interfaceName]; exists {
+		if (family == "ipv4" && (key == "forwarding" || key == "send_redirects" || key == "rp_filter")) || (family == "ipv6" && key == "forwarding") {
+			return nil
+		}
+	}
+	if _, exists := wanInterfaces[interfaceName]; exists && family == "ipv6" && key == "accept_ra" {
+		return nil
+	}
+	return fmt.Errorf("sysctl %q is outside recorded provider scope", mutation.Path)
 }
 
 func restoreRecordedSysctls(mutations []sysctlMutation) error {

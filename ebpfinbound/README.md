@@ -43,7 +43,7 @@ dae-ebpf-tool doctor --wan auto
 dae-ebpf-tool cleanup-stale
 ```
 
-`doctor` is non-mutating. `cleanup-stale` refuses to run while the ownership lock is held and removes only resources whose ownership metadata matches the recorded runtime.
+`doctor` is non-mutating. `cleanup-stale` refuses to run while the ownership lock is held and removes only resources whose namespace, interface, TC slot, BPF program ID and ownership token match the durable runtime journal. A failed teardown marks the journal released so cleanup can be retried without waiting for the embedding process to exit.
 
 ## Build
 
@@ -54,3 +54,19 @@ git submodule update --init --recursive
 cd ebpfinbound
 go generate ./...
 ```
+
+Generation is reproducible for a fixed clang toolchain and does not embed temporary build paths.
+
+## Validation
+
+The privileged integration test uses the real embedded BPF objects. It creates isolated LAN and WAN veth networks, then verifies IPv4 and IPv6 TCP/UDP capture, original destinations, local-process and forwarded-source metadata, exclusive ownership, TC-collision rollback, clean restart, simulated process failure and stale cleanup.
+
+```bash
+cd ebpfinbound
+go test -race ./...
+go vet ./...
+sudo env PATH="$PATH" go test -tags=integration \
+  -run '^TestPrivilegedCaptureLifecycleAndTraffic$' -count=1 -v .
+```
+
+Run the privileged test only on a disposable Linux machine or VM. The test restores leased sysctls and removes its temporary namespaces, links, filters and qdiscs before it exits.

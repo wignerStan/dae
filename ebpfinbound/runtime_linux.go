@@ -80,7 +80,7 @@ var _ Runtime = (*captureRuntime)(nil)
 // after transparent listeners have been published and every required traffic
 // hook is attached. Any startup failure destroys the incomplete BPF collection
 // and every resource created by this call.
-func New(ctx context.Context, options Options) (Runtime, error) {
+func New(ctx context.Context, options Options) (_ Runtime, returnErr error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -106,9 +106,16 @@ func New(ctx context.Context, options Options) (Runtime, error) {
 		return nil, err
 	}
 	cleanupOwnership := true
+	var startupCleanupErr error
 	defer func() {
 		if cleanupOwnership {
-			_ = ownership.Close()
+			var releaseErr error
+			if startupCleanupErr == nil {
+				releaseErr = ownership.Close()
+			} else {
+				releaseErr = ownership.Abandon()
+			}
+			returnErr = errors.Join(returnErr, startupCleanupErr, releaseErr)
 		}
 	}()
 
@@ -116,15 +123,15 @@ func New(ctx context.Context, options Options) (Runtime, error) {
 		return nil, fmt.Errorf("remove memlock limit: %w", err)
 	}
 	ns, err := newCaptureNetNS(ctx, logger, ownership)
+	cleanupNS := ns != nil
+	defer func() {
+		if cleanupNS && ns != nil {
+			startupCleanupErr = errors.Join(startupCleanupErr, ns.Close())
+		}
+	}()
 	if err != nil {
 		return nil, fmt.Errorf("set up capture network namespace: %w", err)
 	}
-	cleanupNS := true
-	defer func() {
-		if cleanupNS {
-			_ = ns.Close()
-		}
-	}()
 	objects, err := loadCaptureBPF(ns, config)
 	if err != nil {
 		return nil, fmt.Errorf("load capture BPF objects: %w", err)
@@ -132,7 +139,7 @@ func New(ctx context.Context, options Options) (Runtime, error) {
 	cleanupBPF := true
 	defer func() {
 		if cleanupBPF {
-			_ = objects.Close()
+			startupCleanupErr = errors.Join(startupCleanupErr, objects.Close())
 		}
 	}()
 
@@ -147,7 +154,7 @@ func New(ctx context.Context, options Options) (Runtime, error) {
 	cleanupListeners := true
 	defer func() {
 		if cleanupListeners {
-			_ = listeners.close()
+			startupCleanupErr = errors.Join(startupCleanupErr, listeners.close())
 		}
 	}()
 	publishedFiles, err := publishListenersOnce(objects, listeners)
@@ -158,7 +165,9 @@ func New(ctx context.Context, options Options) (Runtime, error) {
 	defer func() {
 		if cleanupFiles {
 			for _, file := range publishedFiles {
-				_ = file.Close()
+				if file != nil {
+					startupCleanupErr = errors.Join(startupCleanupErr, file.Close())
+				}
 			}
 		}
 	}()
@@ -177,14 +186,19 @@ func New(ctx context.Context, options Options) (Runtime, error) {
 		janitorDone:    make(chan struct{}),
 	}
 	runtime.gate.init()
+	cleanupAttachments := true
+	defer func() {
+		if cleanupAttachments {
+			startupCleanupErr = errors.Join(startupCleanupErr, runCleanupReverse(runtime.detachFunctions))
+		}
+	}()
 	attachments, detachFunctions, err := runtime.attachDatapath()
+	runtime.detachFunctions = detachFunctions
 	if err != nil {
 		cancel()
 		return nil, err
 	}
-	runtime.detachFunctions = detachFunctions
 	if err := ownership.SetAttachments(attachmentRecords(attachments)); err != nil {
-		_ = runCleanupReverse(detachFunctions)
 		cancel()
 		return nil, fmt.Errorf("record attached traffic hooks: %w", err)
 	}
@@ -198,6 +212,7 @@ func New(ctx context.Context, options Options) (Runtime, error) {
 	cleanupBPF = false
 	cleanupListeners = false
 	cleanupFiles = false
+	cleanupAttachments = false
 	logger.Info("started standalone dae eBPF capture runtime",
 		"lan_interfaces", config.LANInterfaces,
 		"wan_interfaces", config.WANInterfaces,
@@ -330,7 +345,12 @@ func (r *captureRuntime) close() error {
 		}
 	}
 	if ownership != nil {
-		if err := ownership.Close(); err != nil {
+		resourceErr := errors.Join(errs...)
+		if resourceErr == nil {
+			if err := ownership.Close(); err != nil {
+				errs = append(errs, err)
+			}
+		} else if err := ownership.Abandon(); err != nil {
 			errs = append(errs, err)
 		}
 	}
