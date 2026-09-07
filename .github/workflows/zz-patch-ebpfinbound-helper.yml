@@ -1,0 +1,39 @@
+name: Patch eBPF inbound helper signature
+
+on:
+  push:
+    branches:
+      - tmp/build-ebpfinbound-schema-v9-20260906-v1
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: github.event.head_commit.message == 'ci: patch provider helper signature'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: tmp/validate-ebpfinbound-one-shot-20260901
+          fetch-depth: 0
+      - name: Make TC helper compatible with hardened callers
+        shell: bash
+        run: |
+          set -euxo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          path = Path('ebpfinbound/attach_linux.go')
+          text = path.read_text()
+          old = 'func findTCFilter(link netlink.Link, parent, handle uint32) (netlink.Filter, error) {'
+          new = 'func findTCFilter(link netlink.Link, parent, handle uint32, _ ...uint16) (netlink.Filter, error) {'
+          if text.count(old) != 1:
+              raise SystemExit('unexpected findTCFilter signature count')
+          path.write_text(text.replace(old, new, 1))
+          PY
+          gofmt -w ebpfinbound/attach_linux.go
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add ebpfinbound/attach_linux.go
+          git commit -m 'fix(ebpfinbound): tolerate normalized TC priority'
+          git push origin HEAD:tmp/validate-ebpfinbound-one-shot-20260901
