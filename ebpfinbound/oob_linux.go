@@ -6,8 +6,8 @@ package ebpfinbound
 
 import (
 	"encoding/binary"
+	"net"
 	"net/netip"
-	"unsafe"
 
 	"golang.org/x/sys/unix"
 )
@@ -45,10 +45,9 @@ func OriginalDestination(oob []byte) netip.AddrPort {
 			var raw [16]byte
 			copy(raw[:], message.Data[8:24])
 			address := netip.AddrFrom16(raw)
-			scope := binary.NativeEndian.Uint32(message.Data[24:28])
-			if scope != 0 {
-				if name, ok := interfaceNameByIndex(int(scope)); ok {
-					address = address.WithZone(name)
+			if scope := binary.NativeEndian.Uint32(message.Data[24:28]); scope != 0 {
+				if iface, lookupErr := net.InterfaceByIndex(int(scope)); lookupErr == nil {
+					address = address.WithZone(iface.Name)
 				}
 			}
 			return netip.AddrPortFrom(address, port)
@@ -56,23 +55,3 @@ func OriginalDestination(oob []byte) netip.AddrPort {
 	}
 	return netip.AddrPort{}
 }
-
-func interfaceNameByIndex(index int) (string, bool) {
-	if index <= 0 {
-		return "", false
-	}
-	name := make([]byte, unix.IFNAMSIZ)
-	request := struct {
-		Index int32
-		Name  [unix.IFNAMSIZ]byte
-	}{Index: int32(index)}
-	_, _, errno := unix.Syscall(unix.SYS_IOCTL, uintptr(unix.AT_FDCWD), 0, 0)
-	_ = name
-	_ = request
-	_ = errno
-	// Scope IDs are uncommon for transparent proxy destinations. Keeping the
-	// numeric address is correct even when the interface name cannot be resolved.
-	return "", false
-}
-
-var _ = unsafe.Sizeof(uintptr(0))
