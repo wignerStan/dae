@@ -1916,6 +1916,10 @@ static __noinline __s64 route(const __u32 *flag, const void *l4hdr,
 			      const __be32 *saddr, const __be32 *daddr,
 			      const __be32 *mac)
 {
+#ifdef DAE_CAPTURE_ONLY
+	/* Routing policy is owned by the embedding userspace engine. */
+	return (__s64)OUTBOUND_CONTROL_PLANE_ROUTING;
+#endif
 #define _l4proto_type flag[0]
 #define _ipversion_type flag[1]
 #define _pname (&flag[2])
@@ -3384,6 +3388,13 @@ static __noinline bool
 wan_outbound_is_alive(struct __sk_buff *skb, __u8 outbound, __u8 l4proto,
 		      __be16 dport)
 {
+#ifdef DAE_CAPTURE_ONLY
+	(void)skb;
+	(void)outbound;
+	(void)l4proto;
+	(void)dport;
+	return true;
+#else
 	/* Reserved outbounds (must_rules, control-plane routing, logical
 	 * markers) have no connectivity entries: the map below is sized for
 	 * user-defined ids only, so a reserved id would read a zeroed entry
@@ -3415,6 +3426,7 @@ wan_outbound_is_alive(struct __sk_buff *skb, __u8 outbound, __u8 l4proto,
 	if (alive && *alive == 0)
 		return false;
 	return true;
+#endif
 }
 
 static __noinline int
