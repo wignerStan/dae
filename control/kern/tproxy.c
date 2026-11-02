@@ -241,6 +241,11 @@ const volatile struct dae_param PARAM = {};
 static __always_inline bool capture_mark_bypassed(struct __sk_buff *skb)
 {
 #ifdef DAE_CAPTURE_ONLY
+	/* Socket marks remain authoritative when cookie PID metadata belongs to
+	 * another process or the initial PID namespace. Never recapture the
+	 * embedding application's own DNS, outbound, or transparent reply socket. */
+	if (PARAM.dae_socket_mark && skb->mark == PARAM.dae_socket_mark)
+		return true;
 	return PARAM.bypass_mark_mask &&
 	       (skb->mark & PARAM.bypass_mark_mask) == PARAM.bypass_mark;
 #else

@@ -94,7 +94,9 @@ func TestPrivilegedCaptureLifecycleAndTraffic(t *testing.T) {
 	// These sockets belong to a distinct process, so the control-plane PID
 	// exemption cannot accidentally make the mark test pass. No userspace
 	// capture accept/read loop is running: only the real peer can echo back.
-	for _, mark := range []uint32{0x80000, 0x80042} {
+	// The configured output mark must also win when a different PID owns the
+	// socket; cookie metadata is in the initial PID namespace.
+	for _, mark := range []uint32{0x80000, 0x80042, 0x1ee0} {
 		for _, flow := range []struct{ network, destination string }{
 			{"tcp4", "198.18.0.2:18280"}, {"tcp6", "[2001:db8:dae::2]:18281"},
 			{"udp4", "198.18.0.2:18282"}, {"udp6", "[2001:db8:dae::2]:18283"},
