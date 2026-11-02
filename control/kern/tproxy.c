@@ -2067,7 +2067,9 @@ static __always_inline __u32 get_dae0_ifindex(void)
 	__u32 key = 0;
 	__u32 *val = bpf_map_lookup_elem(&dae_ifindex_map, &key);
 
-	if (val)
+	// ARRAY lookup succeeds before userspace initializes its value.
+	// Interface index zero is invalid and must use the frozen fallback.
+	if (val && *val)
 		return *val;
 	return PARAM.dae0_ifindex;
 }
