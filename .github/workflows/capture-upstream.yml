@@ -1,0 +1,42 @@
+name: Rebased capture validation
+on:
+  push:
+    branches: [integration/capture-20261102]
+permissions:
+  contents: read
+jobs:
+  capture:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.27.3'
+          cache: false
+      - name: Install BPF generator
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y clang llvm libbpf-dev iproute2
+          git submodule update --init --depth 1 control/kern/headers
+      - name: Generate current BPF ABI
+        working-directory: ebpfinbound
+        run: go generate ./...
+      - name: Export generated projection
+        if: always()
+        run: git diff --binary -- ebpfinbound > "$RUNNER_TEMP/generated.patch"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: generated-bpf-${{ github.sha }}
+          path: ${{ runner.temp }}/generated.patch
+      - name: Race tests and vet
+        working-directory: ebpfinbound
+        run: |
+          go test -race ./...
+          go vet ./...
+      - name: Exercise capture in disposable runner
+        working-directory: ebpfinbound
+        run: sudo env PATH="$PATH" GOTOOLCHAIN=local GOMODCACHE="$(go env GOMODCACHE)" go test -tags=integration -run '^TestPrivileged' -count=1 -timeout=10m -v .
