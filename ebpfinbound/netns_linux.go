@@ -61,13 +61,13 @@ func newCaptureNetNS(ctx context.Context, log *slog.Logger, owner *ownershipLeas
 		}
 		return owner.SetSysctls(mutations)
 	})
-	if err := ns.setup(ctx); err != nil {
+	if err := ns.setup(ctx, owner); err != nil {
 		return ns, err
 	}
 	return ns, nil
 }
 
-func (ns *captureNetNS) setup(ctx context.Context) (err error) {
+func (ns *captureNetNS) setup(ctx context.Context, owner *ownershipLease) (err error) {
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
 	ns.hostNS, err = netns.Get()
@@ -112,6 +112,11 @@ func (ns *captureNetNS) setup(ctx context.Context) (err error) {
 		return fmt.Errorf("create named capture network namespace: %w", err)
 	}
 	ns.createdNamespace = true
+	if owner != nil {
+		if err := owner.SetNamespaceIdentity(ns.captureNS); err != nil {
+			return fmt.Errorf("record capture network namespace identity: %w", err)
+		}
+	}
 	if err := netns.Set(ns.hostNS); err != nil {
 		return fmt.Errorf("restore host network namespace: %w", err)
 	}
@@ -294,7 +299,10 @@ func (ns *captureNetNS) Close() error {
 		runtime.UnlockOSThread()
 	}
 	if createdNamespace {
-		if err := netns.DeleteNamed(captureNetNSName); err != nil && !errors.Is(err, os.ErrNotExist) {
+		identity, err := identifyNetworkNamespace(captureNS)
+		if err != nil {
+			errs = append(errs, err)
+		} else if err := deleteNamedNetworkNamespace(captureNetNSName, identity); err != nil {
 			errs = append(errs, err)
 		}
 	}
@@ -309,6 +317,70 @@ func (ns *captureNetNS) Close() error {
 		}
 	}
 	return errors.Join(errs...)
+}
+
+func identifyNetworkNamespace(namespace netns.NsHandle) (networkNamespaceIdentity, error) {
+	if !namespace.IsOpen() {
+		return networkNamespaceIdentity{}, errors.New("network namespace handle is closed")
+	}
+	var stat unix.Stat_t
+	if err := unix.Fstat(int(namespace), &stat); err != nil {
+		return networkNamespaceIdentity{}, fmt.Errorf("inspect network namespace identity: %w", err)
+	}
+	identity := networkNamespaceIdentity{device: uint64(stat.Dev), inode: stat.Ino}
+	if !identity.valid() {
+		return networkNamespaceIdentity{}, errors.New("network namespace has an invalid kernel identity")
+	}
+	return identity, nil
+}
+
+func deleteNamedNetworkNamespace(name string, expected networkNamespaceIdentity) error {
+	if !expected.valid() {
+		return errors.New("refuse to delete named network namespace without a kernel identity")
+	}
+	current, err := netns.GetFromName(name)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return fmt.Errorf("open named network namespace %s: %w", name, err)
+	}
+	actual, identityErr := identifyNetworkNamespace(current)
+	closeErr := current.Close()
+	if identityErr != nil {
+		return identityErr
+	}
+	if closeErr != nil {
+		return fmt.Errorf("close named network namespace %s: %w", name, closeErr)
+	}
+	if actual != expected {
+		return fmt.Errorf("refuse to delete named network namespace %s: kernel identity changed", name)
+	}
+	if err := netns.DeleteNamed(name); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("delete named network namespace %s: %w", name, err)
+	}
+	return nil
+}
+
+func withNetNSHandle(target netns.NsHandle, function func() error) (err error) {
+	if !target.IsOpen() {
+		return errors.New("network namespace handle is closed")
+	}
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+	host, err := netns.Get()
+	if err != nil {
+		return err
+	}
+	defer host.Close()
+	if err := netns.Set(target); err != nil {
+		return err
+	}
+	defer func() { err = errors.Join(err, netns.Set(host)) }()
+	if function == nil {
+		return nil
+	}
+	return function()
 }
 
 func deleteOwnedLink(name, token string) error {

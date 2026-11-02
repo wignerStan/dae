@@ -7,6 +7,7 @@ package ebpfinbound
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
@@ -114,6 +115,71 @@ func TestPrivilegedCaptureLifecycleAndTraffic(t *testing.T) {
 
 	// A process crash leaves persistent TC/netns resources behind. The
 	// ownership journal must make their removal safe and complete.
+	runCrashedIntegrationRuntime(t)
+	raw, err := os.ReadFile(ownerRecordPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var legacyRecord ownershipRecord
+	if err := json.Unmarshal(raw, &legacyRecord); err != nil {
+		t.Fatal(err)
+	}
+	legacyRecord.NamespaceDevice = 0
+	legacyRecord.NamespaceInode = 0
+	raw, err = json.MarshalIndent(legacyRecord, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(ownerRecordPath(), append(raw, '\n'), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := CleanupStale(context.Background()); err != nil {
+		t.Fatalf("clean crashed runtime from a legacy journal: %v", err)
+	}
+	assertProviderGone(t)
+	assertIntegrationSysctls(t, beforeSysctls)
+	if err := CleanupStale(context.Background()); err != nil {
+		t.Fatalf("idempotent stale cleanup: %v", err)
+	}
+
+	// Replacing the well-known namespace name must never authorize deletion of
+	// the replacement. Once it is removed, cleanup can safely resume using the
+	// remaining journal entries.
+	runCrashedIntegrationRuntime(t)
+	raw, err = os.ReadFile(ownerRecordPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var record ownershipRecord
+	if err := json.Unmarshal(raw, &record); err != nil {
+		t.Fatal(err)
+	}
+	if record.NamespaceDevice == 0 || record.NamespaceInode == 0 {
+		t.Fatal("crashed runtime did not persist its network namespace identity")
+	}
+	mustRunIP(t, "netns", "del", captureNetNSName)
+	mustRunIP(t, "netns", "add", captureNetNSName)
+	if err := CleanupStale(context.Background()); err == nil || !strings.Contains(err.Error(), "kernel identity changed") {
+		t.Fatalf("stale cleanup did not reject a replacement namespace: %v", err)
+	}
+	if namespace, err := netns.GetFromName(captureNetNSName); err != nil {
+		t.Fatalf("replacement namespace was deleted: %v", err)
+	} else {
+		namespace.Close()
+	}
+	if _, err := os.Stat(ownerRecordPath()); err != nil {
+		t.Fatalf("replacement refusal did not preserve ownership journal: %v", err)
+	}
+	mustRunIP(t, "netns", "del", captureNetNSName)
+	if err := CleanupStale(context.Background()); err != nil {
+		t.Fatalf("resume stale cleanup after removing replacement namespace: %v", err)
+	}
+	assertProviderGone(t)
+	assertIntegrationSysctls(t, beforeSysctls)
+}
+
+func runCrashedIntegrationRuntime(t *testing.T) {
+	t.Helper()
 	command := exec.Command(os.Args[0], "-test.run=^TestPrivilegedCaptureLifecycleAndTraffic$", "-test.v")
 	command.Env = append(os.Environ(), integrationChildEnv+"=1")
 	output, err := command.CombinedOutput()
@@ -124,14 +190,6 @@ func TestPrivilegedCaptureLifecycleAndTraffic(t *testing.T) {
 		t.Fatalf("crashed runtime did not leave an ownership record: %v\n%s", err, output)
 	}
 	assertCaptureAttached(t)
-	if err := CleanupStale(context.Background()); err != nil {
-		t.Fatalf("clean crashed runtime: %v\n%s", err, output)
-	}
-	assertProviderGone(t)
-	assertIntegrationSysctls(t, beforeSysctls)
-	if err := CleanupStale(context.Background()); err != nil {
-		t.Fatalf("idempotent stale cleanup: %v", err)
-	}
 }
 
 func testStartupCollisionRollback(t *testing.T) {
