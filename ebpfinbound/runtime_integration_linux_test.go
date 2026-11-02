@@ -42,6 +42,36 @@ const (
 	integrationServerEnv  = "DAE_EBPF_INTEGRATION_SERVER"
 )
 
+// Marked queries skip capture, but their unmarked replies arrive through a
+// LAN-classified interface. No capture reader runs in this test: only a reply
+// delivered to the original host socket can satisfy the round trip.
+func TestPrivilegedMarkedLANReplies(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("requires root")
+	}
+	for _, tool := range []string{"ip", "tc"} {
+		if _, err := exec.LookPath(tool); err != nil {
+			t.Skip(tool + " is required")
+		}
+	}
+	prepareIntegrationNetwork(t)
+	if err := CleanupStale(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	runtime := startIntegrationRuntime(t)
+	defer runtime.Close()
+	for _, mark := range []uint32{0x1ee0, 0x80000, 0x80042} {
+		for _, flow := range []struct{ network, destination string }{
+			{"tcp4", "192.0.2.2:53"}, {"tcp6", "[2001:db8:dae:1::2]:53"},
+			{"udp4", "192.0.2.2:53"}, {"udp6", "[2001:db8:dae:1::2]:53"},
+		} {
+			t.Run(fmt.Sprintf("%s-mark-%x", flow.network, mark), func(t *testing.T) {
+				testKernelBypassRoundTripInNamespace(t, flow.network, flow.destination, mark, integrationLANNetNS)
+			})
+		}
+	}
+}
+
 func TestPrivilegedCaptureLifecycleAndTraffic(t *testing.T) {
 	if os.Geteuid() != 0 {
 		t.Skip("requires root")
@@ -398,7 +428,11 @@ func testCapturedUDP(t *testing.T, runtime Runtime, network, destination, payloa
 		buffer := make([]byte, 256)
 		oob := make([]byte, 256)
 		n, oobn, _, source, err := listener.ReadMsgUDP(buffer, oob)
-		received <- capturedDatagram{payload: buffer[:n], oob: oob[:oobn], source: source, err: err}
+		if err != nil {
+			received <- capturedDatagram{err: err}
+			return
+		}
+		received <- capturedDatagram{payload: buffer[:n], oob: oob[:oobn], source: source}
 	}()
 
 	destinationAddress, err := net.ResolveUDPAddr(network, destination)
@@ -607,7 +641,12 @@ func runIntegrationClient(t *testing.T, network, destination, payload string) {
 
 func testKernelBypassRoundTrip(t *testing.T, network, destination string, mark uint32) {
 	t.Helper()
-	server := exec.Command("ip", "netns", "exec", integrationWANNetNS, os.Args[0], "-test.run=^TestPrivilegedCaptureLifecycleAndTraffic$")
+	testKernelBypassRoundTripInNamespace(t, network, destination, mark, integrationWANNetNS)
+}
+
+func testKernelBypassRoundTripInNamespace(t *testing.T, network, destination string, mark uint32, serverNetNS string) {
+	t.Helper()
+	server := exec.Command("ip", "netns", "exec", serverNetNS, os.Args[0], "-test.run=^TestPrivilegedCaptureLifecycleAndTraffic$")
 	server.Env = append(os.Environ(), integrationServerEnv+"="+network, integrationDestEnv+"="+destination)
 	stdout, err := server.StdoutPipe()
 	if err != nil {
