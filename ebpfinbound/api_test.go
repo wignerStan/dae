@@ -57,3 +57,25 @@ func TestParseLogLevel(t *testing.T) {
 		t.Fatal("unsupported log level was accepted")
 	}
 }
+
+func TestCaptureBypassMarkValidation(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		mark, mask uint32
+		valid      bool
+	}{
+		{"disabled", 0, 0, true},
+		{"masked", 0x80000, 0xff0000, true},
+		{"exact", 0x80000, 0xffffffff, true},
+		{"missing-mask", 0x80000, 0, false},
+		{"zero-mark-would-bypass-unmarked", 0, 0xff0000, false},
+		{"unreachable-mark-bits", 0x80001, 0xff0000, false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			config := CaptureConfig{WANInterfaces: []string{"eth0"}, BypassMark: test.mark, BypassMarkMask: test.mask}
+			if err := config.Validate(); (err == nil) != test.valid {
+				t.Fatalf("Validate() = %v, valid = %t", err, test.valid)
+			}
+		})
+	}
+}

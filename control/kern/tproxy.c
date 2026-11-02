@@ -225,12 +225,29 @@ struct dae_param {
 	// When bpf_sk_lookup_* finds a socket, we check this mark to skip dae's own sockets.
 	// This prevents false positives in NAT loopback detection for transparent proxying.
 	__u32 dae_socket_mark;
+#ifdef DAE_CAPTURE_ONLY
+	// Preserve an embedding application's kernel-routing mark. The exemption
+	// runs before conntrack, socket-cookie lookup or control-plane handoff.
+	__u32 bypass_mark;
+	__u32 bypass_mark_mask;
+#endif
 };
 
 /* Use const volatile for cilium/ebpf v0.20.0 compatibility.
  * This ensures the variable is placed in .rodata section and
  * can be rewritten from userspace via RewriteConstants. */
 const volatile struct dae_param PARAM = {};
+
+static __always_inline bool capture_mark_bypassed(struct __sk_buff *skb)
+{
+#ifdef DAE_CAPTURE_ONLY
+	return PARAM.bypass_mark_mask &&
+	       (skb->mark & PARAM.bypass_mark_mask) == PARAM.bypass_mark;
+#else
+	return false;
+#endif
+}
+
 
 /* dae_ifindex_map holds the runtime-updatable ifindex of the dae0 device.
  * Unlike PARAM.dae0_ifindex (frozen in .rodata at load time), this ARRAY map
@@ -2777,6 +2794,9 @@ static __noinline int
 do_tproxy_lan_egress(struct __sk_buff *skb, __u32 link_h_len,
 		     struct parsed_packet *out)
 {
+	if (capture_mark_bypassed(skb))
+		return TC_ACT_PIPE;
+
 	__u32 scratch_key = 0;
 	struct parse_transport_ctx *ctx =
 		bpf_map_lookup_elem(&parse_ctx_scratch_map, &scratch_key);
@@ -3166,6 +3186,9 @@ block:
  * before the role was split out, so the callers' stack chains do not grow. */
 static __noinline int do_tproxy_lan_ingress(struct __sk_buff *skb, __u32 link_h_len)
 {
+	if (capture_mark_bypassed(skb))
+		return TC_ACT_PIPE;
+
 	// Per-CPU scratch to stay under 512-byte stack limit.
 	__u32 scratch_key = 0;
 	struct parsed_packet *pkt =
@@ -3298,6 +3321,9 @@ tproxy_wan_ingress_role(struct __sk_buff *skb, __u32 link_h_len,
 /* Middle layer for the WAN-ingress role; see do_tproxy_lan_ingress. */
 static __noinline int do_tproxy_wan_ingress(struct __sk_buff *skb, __u32 link_h_len)
 {
+	if (capture_mark_bypassed(skb))
+		return TC_ACT_PIPE;
+
 	__u32 scratch_key = 0;
 	struct parsed_packet *pkt =
 		bpf_map_lookup_elem(&pkt_scratch_map, &scratch_key);
@@ -3765,6 +3791,9 @@ static __noinline int
 do_tproxy_wan_egress(struct __sk_buff *skb, __u32 link_h_len,
 		     struct parsed_packet *provided_pkt)
 {
+	if (capture_mark_bypassed(skb))
+		return TC_ACT_PIPE;
+
 	if (skb->ingress_ifindex != NOWHERE_IFINDEX)
 		return DAE_TC_CONTINUE;
 

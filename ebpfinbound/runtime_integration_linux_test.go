@@ -5,6 +5,7 @@
 package ebpfinbound
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -14,12 +15,16 @@ import (
 	"net/netip"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
 	"github.com/vishvananda/netlink"
 	"github.com/vishvananda/netns"
+	"golang.org/x/sys/unix"
 )
 
 const (
@@ -33,11 +38,17 @@ const (
 	integrationClientEnv  = "DAE_EBPF_INTEGRATION_CLIENT"
 	integrationDestEnv    = "DAE_EBPF_INTEGRATION_DESTINATION"
 	integrationPayloadEnv = "DAE_EBPF_INTEGRATION_PAYLOAD"
+	integrationMarkEnv    = "DAE_EBPF_INTEGRATION_MARK"
+	integrationServerEnv  = "DAE_EBPF_INTEGRATION_SERVER"
 )
 
 func TestPrivilegedCaptureLifecycleAndTraffic(t *testing.T) {
 	if os.Geteuid() != 0 {
 		t.Skip("requires root")
+	}
+	if network := os.Getenv(integrationServerEnv); network != "" {
+		runIntegrationEchoServer(t, network, os.Getenv(integrationDestEnv))
+		return
 	}
 	if network := os.Getenv(integrationClientEnv); network != "" {
 		runIntegrationClient(t, network, os.Getenv(integrationDestEnv), os.Getenv(integrationPayloadEnv))
@@ -80,6 +91,17 @@ func TestPrivilegedCaptureLifecycleAndTraffic(t *testing.T) {
 		t.Fatal("required process metadata hooks are not active")
 	}
 	assertCaptureAttached(t)
+	// These sockets belong to a distinct process, so the control-plane PID
+	// exemption cannot accidentally make the mark test pass. No userspace
+	// capture accept/read loop is running: only the real peer can echo back.
+	for _, mark := range []uint32{0x80000, 0x80042} {
+		for _, flow := range []struct{ network, destination string }{
+			{"tcp4", "198.18.0.2:18280"}, {"tcp6", "[2001:db8:dae::2]:18281"},
+			{"udp4", "198.18.0.2:18282"}, {"udp6", "[2001:db8:dae::2]:18283"},
+		} {
+			testKernelBypassRoundTrip(t, flow.network, flow.destination, mark)
+		}
+	}
 
 	if _, err := New(context.Background(), integrationOptions()); err == nil || !strings.Contains(err.Error(), "owns the host resources") {
 		t.Fatalf("second owner was not rejected: %v", err)
@@ -239,6 +261,8 @@ func integrationOptions() Options {
 			LANInterfaces:          []string{integrationLAN},
 			WANInterfaces:          []string{integrationWAN},
 			OutputMark:             0x1ee0,
+			BypassMark:             0x80000,
+			BypassMarkMask:         0xff0000,
 			AutoConfigureKernel:    true,
 			RequireProcessMetadata: true,
 		},
@@ -418,6 +442,7 @@ func assertFlowMetadata(t *testing.T, runtime Runtime, network Network, source, 
 		t.Fatalf("metadata not found for %+v", flow)
 	}
 	if expectProcess {
+		expectedPID = integrationExpectedKernelPID(t, expectedPID)
 		if metadata.ProcessID != expectedPID {
 			t.Fatalf("metadata pid = %d, want %d", metadata.ProcessID, expectedPID)
 		}
@@ -432,6 +457,70 @@ func assertFlowMetadata(t *testing.T, runtime Runtime, network Network, source, 
 	if !metadata.HasSourceMAC {
 		t.Fatal("forwarded flow is missing source MAC metadata")
 	}
+}
+
+// BPF's pid comes from the initial PID namespace. Container test runners may
+// opt in to a read-only host proc mount; validate child identity there instead
+// of treating the container's different PID as the expected kernel PID.
+func integrationExpectedKernelPID(t *testing.T, localPID uint32) uint32 {
+	t.Helper()
+	root := os.Getenv("DAE_TEST_HOST_PROC")
+	if root == "" {
+		return localPID
+	}
+	self, err := os.ReadFile(filepath.Join(root, "self", "stat"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	parentPID := strings.Fields(string(self))[0]
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantNamespace, err := os.Stat("/proc/self/ns/pid")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range entries {
+		pid, err := strconv.ParseUint(entry.Name(), 10, 32)
+		if err != nil {
+			continue
+		}
+		raw, err := os.ReadFile(filepath.Join(root, entry.Name(), "status"))
+		if err != nil {
+			continue
+		}
+		fields := make(map[string][]string)
+		for _, line := range strings.Split(string(raw), "\n") {
+			key, value, found := strings.Cut(line, ":")
+			if found {
+				fields[key] = strings.Fields(value)
+			}
+		}
+		parents, namespacePIDs := fields["PPid"], fields["NSpid"]
+		if len(parents) != 1 || parents[0] != parentPID || len(namespacePIDs) == 0 || namespacePIDs[len(namespacePIDs)-1] != strconv.FormatUint(uint64(localPID), 10) {
+			continue
+		}
+		if namespacePIDs[0] != entry.Name() {
+			t.Fatal("host proc PID identity mismatch")
+		}
+		actualNamespace, namespaceErr := os.Stat(filepath.Join(root, entry.Name(), "ns", "pid"))
+		if namespaceErr == nil {
+			if !os.SameFile(wantNamespace, actualNamespace) {
+				continue
+			}
+		} else {
+			// An exited-but-unreaped UDP child has no namespace symlink.
+			// PPid and NSpid still identify our unique direct child exactly.
+			state := fields["State"]
+			if len(state) == 0 || state[0] != "Z" {
+				t.Fatalf("read child PID namespace: %v", namespaceErr)
+			}
+		}
+		return uint32(pid)
+	}
+	t.Fatalf("no initial-namespace PID found for direct child %d", localPID)
+	return 0
 }
 
 func integrationClientCommand(network, destination, payload, clientNetNS string) (*exec.Cmd, *bytes.Buffer) {
@@ -453,6 +542,37 @@ func integrationClientCommand(network, destination, payload, clientNetNS string)
 
 func runIntegrationClient(t *testing.T, network, destination, payload string) {
 	t.Helper()
+	if rawMark := os.Getenv(integrationMarkEnv); rawMark != "" {
+		mark, err := strconv.ParseUint(rawMark, 0, 32)
+		if err != nil {
+			t.Fatal(err)
+		}
+		dialer := net.Dialer{Timeout: 8 * time.Second, Control: func(_, _ string, raw syscall.RawConn) error {
+			var socketErr error
+			if err := raw.Control(func(fd uintptr) { socketErr = unix.SetsockoptInt(int(fd), unix.SOL_SOCKET, unix.SO_MARK, int(mark)) }); err != nil {
+				return err
+			}
+			return socketErr
+		}}
+		connection, err := dialer.Dial(network, destination)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer connection.Close()
+		_ = connection.SetDeadline(time.Now().Add(8 * time.Second))
+		if _, err := connection.Write([]byte(payload)); err != nil {
+			t.Fatal(err)
+		}
+		buffer := make([]byte, 256)
+		n, err := connection.Read(buffer)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(buffer[:n]) != payload {
+			t.Fatalf("kernel peer echo = %q, want %q", buffer[:n], payload)
+		}
+		return
+	}
 	if strings.HasPrefix(network, "tcp") {
 		connection, err := net.DialTimeout(network, destination, 8*time.Second)
 		if err != nil {
@@ -479,6 +599,85 @@ func runIntegrationClient(t *testing.T, network, destination, payload string) {
 	}
 	defer connection.Close()
 	if _, err := connection.Write([]byte(payload)); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func testKernelBypassRoundTrip(t *testing.T, network, destination string, mark uint32) {
+	t.Helper()
+	server := exec.Command("ip", "netns", "exec", integrationWANNetNS, os.Args[0], "-test.run=^TestPrivilegedCaptureLifecycleAndTraffic$")
+	server.Env = append(os.Environ(), integrationServerEnv+"="+network, integrationDestEnv+"="+destination)
+	stdout, err := server.StdoutPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	server.Stderr = os.Stderr
+	if err := server.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = server.Process.Kill(); _ = server.Wait() }()
+	ready := make(chan bool, 1)
+	go func() {
+		scanner := bufio.NewScanner(stdout)
+		ready <- scanner.Scan() && scanner.Text() == "BYPASS_READY"
+	}()
+	select {
+	case ok := <-ready:
+		if !ok {
+			t.Fatal("kernel echo peer failed to start")
+		}
+	case <-time.After(8 * time.Second):
+		t.Fatal("kernel echo peer readiness timeout")
+	}
+	client, output := integrationClientCommand(network, destination, "kernel-bypass-echo", "")
+	client.Env = append(client.Env, integrationMarkEnv+"="+strconv.FormatUint(uint64(mark), 10))
+	if err := client.Run(); err != nil {
+		t.Fatalf("marked %s round trip: %v\n%s", network, err, output)
+	}
+	if err := server.Wait(); err != nil {
+		t.Fatalf("kernel peer: %v", err)
+	}
+	t.Logf("kernel bypass %s SO_MARK=%#x echoed at original peer", network, mark)
+}
+
+func runIntegrationEchoServer(t *testing.T, network, destination string) {
+	t.Helper()
+	if strings.HasPrefix(network, "tcp") {
+		listener, err := net.Listen(network, destination)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer listener.Close()
+		fmt.Println("BYPASS_READY")
+		connection, err := listener.Accept()
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer connection.Close()
+		_ = connection.SetDeadline(time.Now().Add(8 * time.Second))
+		buffer := make([]byte, 256)
+		n, err := connection.Read(buffer)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := connection.Write(buffer[:n]); err != nil {
+			t.Fatal(err)
+		}
+		return
+	}
+	listener, err := net.ListenPacket(network, destination)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	_ = listener.SetDeadline(time.Now().Add(8 * time.Second))
+	fmt.Println("BYPASS_READY")
+	buffer := make([]byte, 256)
+	n, source, err := listener.ReadFrom(buffer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := listener.WriteTo(buffer[:n], source); err != nil {
 		t.Fatal(err)
 	}
 }
