@@ -238,19 +238,24 @@ struct dae_param {
  * can be rewritten from userspace via RewriteConstants. */
 const volatile struct dae_param PARAM = {};
 
-static __always_inline bool capture_mark_bypassed(struct __sk_buff *skb)
+static __always_inline bool capture_mark_matches(__u32 mark)
 {
 #ifdef DAE_CAPTURE_ONLY
 	/* Socket marks remain authoritative when cookie PID metadata belongs to
 	 * another process or the initial PID namespace. Never recapture the
 	 * embedding application's own DNS, outbound, or transparent reply socket. */
-	if (PARAM.dae_socket_mark && skb->mark == PARAM.dae_socket_mark)
+	if (PARAM.dae_socket_mark && mark == PARAM.dae_socket_mark)
 		return true;
 	return PARAM.bypass_mark_mask &&
-	       (skb->mark & PARAM.bypass_mark_mask) == PARAM.bypass_mark;
+	       (mark & PARAM.bypass_mark_mask) == PARAM.bypass_mark;
 #else
 	return false;
 #endif
+}
+
+static __always_inline bool capture_mark_bypassed(struct __sk_buff *skb)
+{
+	return capture_mark_matches(skb->mark);
 }
 
 
@@ -3189,6 +3194,55 @@ block:
 
 /* Middle layer: parse once, then run the LAN-ingress role. One call frame, as
  * before the role was split out, so the callers' stack chains do not grow. */
+// A marked connected host socket may send through a LAN-classified interface. Its
+// reply has no skb mark and no capture conntrack entry, because the query was
+// exempted. Preserve delivery to that socket in the receiving device's netns,
+// not the separate provider netns containing the transparent listeners.
+static __always_inline bool
+capture_lan_udp_reply_bypassed(struct __sk_buff *skb,
+			       const struct parsed_packet *pkt)
+{
+#ifdef DAE_CAPTURE_ONLY
+	if (pkt->l4proto != IPPROTO_UDP)
+		return false;
+
+	struct bpf_sock_tuple tuple = { 0 };
+	__u32 tuple_size;
+	if (pkt->ethh.h_proto == bpf_htons(ETH_P_IP)) {
+		tuple.ipv4.daddr = pkt->tuples.five.dip.u6_addr32[3];
+		tuple.ipv4.saddr = pkt->tuples.five.sip.u6_addr32[3];
+		tuple.ipv4.dport = pkt->tuples.five.dport;
+		tuple.ipv4.sport = pkt->tuples.five.sport;
+		tuple_size = sizeof(tuple.ipv4);
+	} else {
+		__builtin_memcpy(tuple.ipv6.daddr, &pkt->tuples.five.dip,
+				 IPV6_BYTE_LENGTH);
+		__builtin_memcpy(tuple.ipv6.saddr, &pkt->tuples.five.sip,
+				 IPV6_BYTE_LENGTH);
+		tuple.ipv6.dport = pkt->tuples.five.dport;
+		tuple.ipv6.sport = pkt->tuples.five.sport;
+		tuple_size = sizeof(tuple.ipv6);
+	}
+
+	// -1 is BPF_F_CURRENT_NETNS; some bundled vmlinux headers omit its enum.
+	struct bpf_sock *sk = bpf_sk_lookup_udp(skb, &tuple, tuple_size,
+					     (__u64)-1, 0);
+	if (!sk)
+		return false;
+	struct bpf_sock *fullsock = bpf_sk_fullsock(sk);
+	// Only a connected UDP socket proves ownership of this complete tuple.
+	// Unconnected transparent reply sockets bind foreign addresses, and even
+	// wildcard sockets can match transit packets to an unrelated destination.
+	bool bypass = fullsock && fullsock->state == BPF_TCP_ESTABLISHED &&
+		      capture_mark_matches(fullsock->mark);
+	bpf_sk_release(sk);
+	return bypass;
+#else
+	return false;
+#endif
+}
+
+
 static __noinline int do_tproxy_lan_ingress(struct __sk_buff *skb, __u32 link_h_len)
 {
 	if (capture_mark_bypassed(skb))
@@ -3215,6 +3269,9 @@ static __noinline int do_tproxy_lan_ingress(struct __sk_buff *skb, __u32 link_h_
 		report_parse_passthrough(ret);
 		return TC_ACT_OK;
 	}
+
+	if (capture_lan_udp_reply_bypassed(skb, pkt))
+		return TC_ACT_PIPE;
 
 	return tproxy_lan_ingress_role(skb, link_h_len, pkt);
 }

@@ -84,7 +84,7 @@ jobs:
             HOME="$HOME" \
             GOCACHE="$RUNNER_TEMP/root-go-cache" \
             GOMODCACHE="$(go env GOMODCACHE)" \
-            go test -tags=integration -run '^TestPrivilegedCaptureLifecycleAndTraffic$' -count=2 -v .
+            go test -tags=integration -run '^TestPrivileged(BypassPreservesPacketMark|CaptureLifecycleAndTraffic)$' -count=2 -v .
           sudo test ! -e /run/dae-ebpfinbound/owner.json
           ! ip link show dae-ebpf0
           ! ip link show daecilan0
