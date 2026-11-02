@@ -30,11 +30,13 @@ type bpfConnState struct {
 			HasRouting uint8
 		}
 	}
-	Mac     [6]uint8
-	Padding [2]uint8
-	Pname   [16]uint8
-	Pid     uint32
-	_       [4]byte
+	Mac                [6]uint8
+	Padding            [2]uint8
+	Pname              [16]uint8
+	Pid                uint32
+	RoutingEpochSlot   uint8
+	PaddingAfterPid    uint8
+	DatapathGeneration uint16
 }
 
 type bpfDaeParam struct {
@@ -47,7 +49,7 @@ type bpfDaeParam struct {
 	PaddingAfterMac      [2]uint8
 	UseRedirectPeer      uint8
 	HasBpfGetCurrentTask uint8
-	Padding2             uint16
+	DatapathGeneration   uint16
 	DaeSocketMark        uint32
 	BypassMark           uint32
 	BypassMarkMask       uint32
@@ -57,15 +59,16 @@ type bpfRoutingHandoffEntry struct {
 	_          structs.HostLayout
 	LastSeenNs uint64
 	Result     struct {
-		_        structs.HostLayout
-		Mark     uint32
-		Must     uint8
-		Mac      [6]uint8
-		Outbound uint8
-		Pname    [16]uint8
-		Pid      uint32
-		Dscp     uint8
-		_        [3]byte
+		_                  structs.HostLayout
+		Mark               uint32
+		Must               uint8
+		Mac                [6]uint8
+		Outbound           uint8
+		Pname              [16]uint8
+		Pid                uint32
+		Dscp               uint8
+		RoutingEpochSlot   uint8
+		DatapathGeneration uint16
 	}
 	_ [4]byte
 }
@@ -128,34 +131,42 @@ type bpfSpecs struct {
 //
 // It can be passed ebpf.CollectionSpec.Assign.
 type bpfProgramSpecs struct {
-	TproxyDae0Ingress      *ebpf.ProgramSpec `ebpf:"tproxy_dae0_ingress"`
-	TproxyDae0peerIngress  *ebpf.ProgramSpec `ebpf:"tproxy_dae0peer_ingress"`
-	TproxyLanEgressL2      *ebpf.ProgramSpec `ebpf:"tproxy_lan_egress_l2"`
-	TproxyLanEgressL3      *ebpf.ProgramSpec `ebpf:"tproxy_lan_egress_l3"`
-	TproxyLanIngressL2     *ebpf.ProgramSpec `ebpf:"tproxy_lan_ingress_l2"`
-	TproxyLanIngressL3     *ebpf.ProgramSpec `ebpf:"tproxy_lan_ingress_l3"`
-	TproxySkMsgRedir       *ebpf.ProgramSpec `ebpf:"tproxy_sk_msg_redir"`
-	TproxySockops          *ebpf.ProgramSpec `ebpf:"tproxy_sockops"`
-	TproxyWanCgConnect4    *ebpf.ProgramSpec `ebpf:"tproxy_wan_cg_connect4"`
-	TproxyWanCgConnect6    *ebpf.ProgramSpec `ebpf:"tproxy_wan_cg_connect6"`
-	TproxyWanCgSendmsg4    *ebpf.ProgramSpec `ebpf:"tproxy_wan_cg_sendmsg4"`
-	TproxyWanCgSendmsg6    *ebpf.ProgramSpec `ebpf:"tproxy_wan_cg_sendmsg6"`
-	TproxyWanCgSockCreate  *ebpf.ProgramSpec `ebpf:"tproxy_wan_cg_sock_create"`
-	TproxyWanCgSockRelease *ebpf.ProgramSpec `ebpf:"tproxy_wan_cg_sock_release"`
-	TproxyWanEgressL2      *ebpf.ProgramSpec `ebpf:"tproxy_wan_egress_l2"`
-	TproxyWanEgressL3      *ebpf.ProgramSpec `ebpf:"tproxy_wan_egress_l3"`
-	TproxyWanIngressL2     *ebpf.ProgramSpec `ebpf:"tproxy_wan_ingress_l2"`
-	TproxyWanIngressL3     *ebpf.ProgramSpec `ebpf:"tproxy_wan_ingress_l3"`
+	TcpOffloadRedirect          *ebpf.ProgramSpec `ebpf:"tcp_offload_redirect"`
+	TcpOffloadSentAccount       *ebpf.ProgramSpec `ebpf:"tcp_offload_sent_account"`
+	TcpOffloadSentAccountKprobe *ebpf.ProgramSpec `ebpf:"tcp_offload_sent_account_kprobe"`
+	TproxyDae0Ingress           *ebpf.ProgramSpec `ebpf:"tproxy_dae0_ingress"`
+	TproxyDae0peerIngress       *ebpf.ProgramSpec `ebpf:"tproxy_dae0peer_ingress"`
+	TproxyLanEgressL2           *ebpf.ProgramSpec `ebpf:"tproxy_lan_egress_l2"`
+	TproxyLanEgressL3           *ebpf.ProgramSpec `ebpf:"tproxy_lan_egress_l3"`
+	TproxyLanIngressL2          *ebpf.ProgramSpec `ebpf:"tproxy_lan_ingress_l2"`
+	TproxyLanIngressL3          *ebpf.ProgramSpec `ebpf:"tproxy_lan_ingress_l3"`
+	TproxyLanWanEgressL2        *ebpf.ProgramSpec `ebpf:"tproxy_lan_wan_egress_l2"`
+	TproxyLanWanEgressL3        *ebpf.ProgramSpec `ebpf:"tproxy_lan_wan_egress_l3"`
+	TproxyWanCgConnect4         *ebpf.ProgramSpec `ebpf:"tproxy_wan_cg_connect4"`
+	TproxyWanCgConnect6         *ebpf.ProgramSpec `ebpf:"tproxy_wan_cg_connect6"`
+	TproxyWanCgSendmsg4         *ebpf.ProgramSpec `ebpf:"tproxy_wan_cg_sendmsg4"`
+	TproxyWanCgSendmsg6         *ebpf.ProgramSpec `ebpf:"tproxy_wan_cg_sendmsg6"`
+	TproxyWanCgSockCreate       *ebpf.ProgramSpec `ebpf:"tproxy_wan_cg_sock_create"`
+	TproxyWanCgSockRelease      *ebpf.ProgramSpec `ebpf:"tproxy_wan_cg_sock_release"`
+	TproxyWanEgressL2           *ebpf.ProgramSpec `ebpf:"tproxy_wan_egress_l2"`
+	TproxyWanEgressL3           *ebpf.ProgramSpec `ebpf:"tproxy_wan_egress_l3"`
+	TproxyWanIngressL2          *ebpf.ProgramSpec `ebpf:"tproxy_wan_ingress_l2"`
+	TproxyWanIngressL3          *ebpf.ProgramSpec `ebpf:"tproxy_wan_ingress_l3"`
+	TproxyWanLanIngressL2       *ebpf.ProgramSpec `ebpf:"tproxy_wan_lan_ingress_l2"`
+	TproxyWanLanIngressL3       *ebpf.ProgramSpec `ebpf:"tproxy_wan_lan_ingress_l3"`
 }
 
 // bpfMapSpecs contains maps before they are loaded into the kernel.
 //
 // It can be passed ebpf.CollectionSpec.Assign.
 type bpfMapSpecs struct {
+	ActiveRoutingEpochMap    *ebpf.MapSpec `ebpf:"active_routing_epoch_map"`
+	AliveBlockRateMap        *ebpf.MapSpec `ebpf:"alive_block_rate_map"`
 	BpfStatsMap              *ebpf.MapSpec `ebpf:"bpf_stats_map"`
 	ConnStateMap             *ebpf.MapSpec `ebpf:"conn_state_map"`
 	ConntrackArgsMap         *ebpf.MapSpec `ebpf:"conntrack_args_map"`
 	CookiePidMap             *ebpf.MapSpec `ebpf:"cookie_pid_map"`
+	DaeIfindexMap            *ebpf.MapSpec `ebpf:"dae_ifindex_map"`
 	DomainRoutingMap         *ebpf.MapSpec `ebpf:"domain_routing_map"`
 	EventRingbuf             *ebpf.MapSpec `ebpf:"event_ringbuf"`
 	FastSock                 *ebpf.MapSpec `ebpf:"fast_sock"`
@@ -169,6 +180,8 @@ type bpfMapSpecs struct {
 	RoutingHandoffMap        *ebpf.MapSpec `ebpf:"routing_handoff_map"`
 	RoutingMap               *ebpf.MapSpec `ebpf:"routing_map"`
 	RoutingMetaMap           *ebpf.MapSpec `ebpf:"routing_meta_map"`
+	TcpOffloadPause          *ebpf.MapSpec `ebpf:"tcp_offload_pause"`
+	TcpOffloadSent           *ebpf.MapSpec `ebpf:"tcp_offload_sent"`
 	UnusedLpmType            *ebpf.MapSpec `ebpf:"unused_lpm_type"`
 	WanEgressRouteScratchMap *ebpf.MapSpec `ebpf:"wan_egress_route_scratch_map"`
 }
@@ -177,7 +190,8 @@ type bpfMapSpecs struct {
 //
 // It can be passed ebpf.CollectionSpec.Assign.
 type bpfVariableSpecs struct {
-	PARAM *ebpf.VariableSpec `ebpf:"PARAM"`
+	EVENT_RATE *ebpf.VariableSpec `ebpf:"EVENT_RATE"`
+	PARAM      *ebpf.VariableSpec `ebpf:"PARAM"`
 }
 
 // bpfObjects contains all objects after they have been loaded into the kernel.
@@ -200,10 +214,13 @@ func (o *bpfObjects) Close() error {
 //
 // It can be passed to loadBpfObjects or ebpf.CollectionSpec.LoadAndAssign.
 type bpfMaps struct {
+	ActiveRoutingEpochMap    *ebpf.Map `ebpf:"active_routing_epoch_map"`
+	AliveBlockRateMap        *ebpf.Map `ebpf:"alive_block_rate_map"`
 	BpfStatsMap              *ebpf.Map `ebpf:"bpf_stats_map"`
 	ConnStateMap             *ebpf.Map `ebpf:"conn_state_map"`
 	ConntrackArgsMap         *ebpf.Map `ebpf:"conntrack_args_map"`
 	CookiePidMap             *ebpf.Map `ebpf:"cookie_pid_map"`
+	DaeIfindexMap            *ebpf.Map `ebpf:"dae_ifindex_map"`
 	DomainRoutingMap         *ebpf.Map `ebpf:"domain_routing_map"`
 	EventRingbuf             *ebpf.Map `ebpf:"event_ringbuf"`
 	FastSock                 *ebpf.Map `ebpf:"fast_sock"`
@@ -217,16 +234,21 @@ type bpfMaps struct {
 	RoutingHandoffMap        *ebpf.Map `ebpf:"routing_handoff_map"`
 	RoutingMap               *ebpf.Map `ebpf:"routing_map"`
 	RoutingMetaMap           *ebpf.Map `ebpf:"routing_meta_map"`
+	TcpOffloadPause          *ebpf.Map `ebpf:"tcp_offload_pause"`
+	TcpOffloadSent           *ebpf.Map `ebpf:"tcp_offload_sent"`
 	UnusedLpmType            *ebpf.Map `ebpf:"unused_lpm_type"`
 	WanEgressRouteScratchMap *ebpf.Map `ebpf:"wan_egress_route_scratch_map"`
 }
 
 func (m *bpfMaps) Close() error {
 	return _BpfClose(
+		m.ActiveRoutingEpochMap,
+		m.AliveBlockRateMap,
 		m.BpfStatsMap,
 		m.ConnStateMap,
 		m.ConntrackArgsMap,
 		m.CookiePidMap,
+		m.DaeIfindexMap,
 		m.DomainRoutingMap,
 		m.EventRingbuf,
 		m.FastSock,
@@ -240,6 +262,8 @@ func (m *bpfMaps) Close() error {
 		m.RoutingHandoffMap,
 		m.RoutingMap,
 		m.RoutingMetaMap,
+		m.TcpOffloadPause,
+		m.TcpOffloadSent,
 		m.UnusedLpmType,
 		m.WanEgressRouteScratchMap,
 	)
@@ -249,43 +273,52 @@ func (m *bpfMaps) Close() error {
 //
 // It can be passed to loadBpfObjects or ebpf.CollectionSpec.LoadAndAssign.
 type bpfVariables struct {
-	PARAM *ebpf.Variable `ebpf:"PARAM"`
+	EVENT_RATE *ebpf.Variable `ebpf:"EVENT_RATE"`
+	PARAM      *ebpf.Variable `ebpf:"PARAM"`
 }
 
 // bpfPrograms contains all programs after they have been loaded into the kernel.
 //
 // It can be passed to loadBpfObjects or ebpf.CollectionSpec.LoadAndAssign.
 type bpfPrograms struct {
-	TproxyDae0Ingress      *ebpf.Program `ebpf:"tproxy_dae0_ingress"`
-	TproxyDae0peerIngress  *ebpf.Program `ebpf:"tproxy_dae0peer_ingress"`
-	TproxyLanEgressL2      *ebpf.Program `ebpf:"tproxy_lan_egress_l2"`
-	TproxyLanEgressL3      *ebpf.Program `ebpf:"tproxy_lan_egress_l3"`
-	TproxyLanIngressL2     *ebpf.Program `ebpf:"tproxy_lan_ingress_l2"`
-	TproxyLanIngressL3     *ebpf.Program `ebpf:"tproxy_lan_ingress_l3"`
-	TproxySkMsgRedir       *ebpf.Program `ebpf:"tproxy_sk_msg_redir"`
-	TproxySockops          *ebpf.Program `ebpf:"tproxy_sockops"`
-	TproxyWanCgConnect4    *ebpf.Program `ebpf:"tproxy_wan_cg_connect4"`
-	TproxyWanCgConnect6    *ebpf.Program `ebpf:"tproxy_wan_cg_connect6"`
-	TproxyWanCgSendmsg4    *ebpf.Program `ebpf:"tproxy_wan_cg_sendmsg4"`
-	TproxyWanCgSendmsg6    *ebpf.Program `ebpf:"tproxy_wan_cg_sendmsg6"`
-	TproxyWanCgSockCreate  *ebpf.Program `ebpf:"tproxy_wan_cg_sock_create"`
-	TproxyWanCgSockRelease *ebpf.Program `ebpf:"tproxy_wan_cg_sock_release"`
-	TproxyWanEgressL2      *ebpf.Program `ebpf:"tproxy_wan_egress_l2"`
-	TproxyWanEgressL3      *ebpf.Program `ebpf:"tproxy_wan_egress_l3"`
-	TproxyWanIngressL2     *ebpf.Program `ebpf:"tproxy_wan_ingress_l2"`
-	TproxyWanIngressL3     *ebpf.Program `ebpf:"tproxy_wan_ingress_l3"`
+	TcpOffloadRedirect          *ebpf.Program `ebpf:"tcp_offload_redirect"`
+	TcpOffloadSentAccount       *ebpf.Program `ebpf:"tcp_offload_sent_account"`
+	TcpOffloadSentAccountKprobe *ebpf.Program `ebpf:"tcp_offload_sent_account_kprobe"`
+	TproxyDae0Ingress           *ebpf.Program `ebpf:"tproxy_dae0_ingress"`
+	TproxyDae0peerIngress       *ebpf.Program `ebpf:"tproxy_dae0peer_ingress"`
+	TproxyLanEgressL2           *ebpf.Program `ebpf:"tproxy_lan_egress_l2"`
+	TproxyLanEgressL3           *ebpf.Program `ebpf:"tproxy_lan_egress_l3"`
+	TproxyLanIngressL2          *ebpf.Program `ebpf:"tproxy_lan_ingress_l2"`
+	TproxyLanIngressL3          *ebpf.Program `ebpf:"tproxy_lan_ingress_l3"`
+	TproxyLanWanEgressL2        *ebpf.Program `ebpf:"tproxy_lan_wan_egress_l2"`
+	TproxyLanWanEgressL3        *ebpf.Program `ebpf:"tproxy_lan_wan_egress_l3"`
+	TproxyWanCgConnect4         *ebpf.Program `ebpf:"tproxy_wan_cg_connect4"`
+	TproxyWanCgConnect6         *ebpf.Program `ebpf:"tproxy_wan_cg_connect6"`
+	TproxyWanCgSendmsg4         *ebpf.Program `ebpf:"tproxy_wan_cg_sendmsg4"`
+	TproxyWanCgSendmsg6         *ebpf.Program `ebpf:"tproxy_wan_cg_sendmsg6"`
+	TproxyWanCgSockCreate       *ebpf.Program `ebpf:"tproxy_wan_cg_sock_create"`
+	TproxyWanCgSockRelease      *ebpf.Program `ebpf:"tproxy_wan_cg_sock_release"`
+	TproxyWanEgressL2           *ebpf.Program `ebpf:"tproxy_wan_egress_l2"`
+	TproxyWanEgressL3           *ebpf.Program `ebpf:"tproxy_wan_egress_l3"`
+	TproxyWanIngressL2          *ebpf.Program `ebpf:"tproxy_wan_ingress_l2"`
+	TproxyWanIngressL3          *ebpf.Program `ebpf:"tproxy_wan_ingress_l3"`
+	TproxyWanLanIngressL2       *ebpf.Program `ebpf:"tproxy_wan_lan_ingress_l2"`
+	TproxyWanLanIngressL3       *ebpf.Program `ebpf:"tproxy_wan_lan_ingress_l3"`
 }
 
 func (p *bpfPrograms) Close() error {
 	return _BpfClose(
+		p.TcpOffloadRedirect,
+		p.TcpOffloadSentAccount,
+		p.TcpOffloadSentAccountKprobe,
 		p.TproxyDae0Ingress,
 		p.TproxyDae0peerIngress,
 		p.TproxyLanEgressL2,
 		p.TproxyLanEgressL3,
 		p.TproxyLanIngressL2,
 		p.TproxyLanIngressL3,
-		p.TproxySkMsgRedir,
-		p.TproxySockops,
+		p.TproxyLanWanEgressL2,
+		p.TproxyLanWanEgressL3,
 		p.TproxyWanCgConnect4,
 		p.TproxyWanCgConnect6,
 		p.TproxyWanCgSendmsg4,
@@ -296,6 +329,8 @@ func (p *bpfPrograms) Close() error {
 		p.TproxyWanEgressL3,
 		p.TproxyWanIngressL2,
 		p.TproxyWanIngressL3,
+		p.TproxyWanLanIngressL2,
+		p.TproxyWanLanIngressL3,
 	)
 }
 
